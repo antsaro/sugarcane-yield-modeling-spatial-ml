@@ -1,0 +1,1991 @@
+---
+title: "Data Preprocessing - Fusion"
+author: "Antsa Sarobidy"
+format: html
+editor: visual
+---
+
+# I.MERGE SOIL GEOPACKAGE WITH SUGARCANE CSV DATA (To run after INLA)
+
+This initial step combines two fundamental datasets that form the foundation of our analysis. The soil geopackage contains spatial information and predictions for various soil properties across different parcels and years, while the sugarcane CSV holds agronomic data including yield measurements, crop management practices, and quality metrics. By merging these datasets on parcel identifiers and campaign years, we create a comprehensive database that links soil characteristics with agricultural outcomes. The script handles potential data quality issues such as duplicate records and inconsistent date formats, ensuring a clean merge that preserves all soil records while adding sugarcane information where available. The output is a unified geopackage that maintains spatial geometry while incorporating both soil and sugarcane variables, with all sugarcane columns clearly prefixed for easy identification.
+
+```{r}
+# ============================================================================
+# MERGE SOIL GEOPACKAGE WITH SUGARCANE CSV DATA
+# Creates combined dataset with all soil predictions + sugarcane variables    
+# ============================================================================
+
+library(sf)
+library(dplyr)
+library(readr)
+library(tidyr)
+
+cat("========================================\n")
+cat("  MERGE SOIL & SUGARCANE DATASETS      \n")
+cat("========================================\n\n")
+
+# ============================================================================
+# STEP 1: LOAD SOIL GEOPACKAGE DATASET
+# ============================================================================
+cat("📂 LOADING SOIL GEOPACKAGE DATASET:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_ALL_VARIABLES_enhanced_predictions2.gpkg"
+
+if (!file.exists(gpkg_path)) {
+  stop("❌ Geopackage file not found at: ", gpkg_path)
+}
+
+soil_data <- st_read(gpkg_path, quiet = TRUE)
+cat("✅ Geopackage loaded successfully\n")
+cat("• Total observations:", nrow(soil_data), "\n")
+cat("• Total columns:", ncol(soil_data), "\n")
+cat("• Unique parcels (field):", length(unique(soil_data$field)), "\n")
+cat("• Year range:", min(soil_data$Year, na.rm = TRUE), "-", max(soil_data$Year, na.rm = TRUE), "\n")
+
+# Store original column order
+original_columns <- colnames(soil_data)
+cat("• Original soil columns:", length(original_columns), "\n")
+
+# ============================================================================
+# STEP 2: LOAD SUGARCANE CSV DATASET
+# ============================================================================
+cat("\n📂 LOADING SUGARCANE CSV DATASET:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+csv_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/sugarcane_data_converted.csv"
+
+if (!file.exists(csv_path)) {
+  stop("❌ CSV file not found at: ", csv_path)
+}
+
+sugarcane_data <- read_csv(csv_path, show_col_types = FALSE)
+cat("✅ CSV loaded successfully\n")
+cat("• Total observations:", nrow(sugarcane_data), "\n")
+cat("• Total columns:", ncol(sugarcane_data), "\n")
+
+# Identify parcel and campaign columns (case-insensitive)
+parcel_col <- grep("^parcel$|^parcelle$|^field$", 
+                   colnames(sugarcane_data), ignore.case = TRUE, value = TRUE)
+campaign_col <- grep("^campaign$|^campagne$", 
+                     colnames(sugarcane_data), ignore.case = TRUE, value = TRUE)
+
+if (length(parcel_col) == 0 || length(campaign_col) == 0) {
+  stop("❌ Could not find parcel or campaign columns in CSV")
+}
+
+cat("• Parcel column identified:", parcel_col[1], "\n")
+cat("• Campaign column identified:", campaign_col[1], "\n")
+
+# ============================================================================
+# STEP 3: PREPARE SUGARCANE DATA
+# ============================================================================
+cat("\n🔄 PREPARING SUGARCANE DATA:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Convert campaign to year
+convert_campaign_to_year <- function(campaign) {
+  if (is.na(campaign)) return(NA_integer_)
+  
+  # Extract first part (e.g., "03" from "03-04")
+  first_part <- sub("-.*", "", as.character(campaign))
+  first_part <- gsub("[^0-9]", "", first_part)
+  
+  if (nchar(first_part) == 0) return(NA_integer_)
+  
+  year_short <- as.integer(first_part)
+  
+  # Convert 2-digit year to 4-digit
+  if (year_short <= 50) {
+    year_full <- 2000 + year_short
+  } else {
+    year_full <- 1900 + year_short
+  }
+  
+  return(year_full)
+}
+
+# Rename and prepare sugarcane data
+sugarcane_prepared <- sugarcane_data %>%
+  rename(
+    field = !!parcel_col[1],
+    Campaign = !!campaign_col[1]
+  ) %>%
+  mutate(Year = sapply(Campaign, convert_campaign_to_year)) %>%
+  filter(!is.na(Year)) %>%
+  # Remove any columns that might conflict with soil data
+  select(-any_of(c("geometry", "geom")))
+
+cat("✅ Sugarcane data prepared\n")
+cat("• Observations with valid year:", nrow(sugarcane_prepared), "\n")
+cat("• Unique field-year combinations:", 
+    nrow(distinct(sugarcane_prepared, field, Year)), "\n")
+
+# Show sugarcane columns (excluding field, Year, Campaign)
+sugarcane_columns <- setdiff(colnames(sugarcane_prepared), c("field", "Year", "Campaign"))
+cat("• Sugarcane variables to add:", length(sugarcane_columns), "\n")
+
+if (length(sugarcane_columns) > 0) {
+  cat("\n📋 Sugarcane variables:\n")
+  for (i in seq_along(sugarcane_columns)) {
+    col_name <- sugarcane_columns[i]
+    non_na <- sum(!is.na(sugarcane_prepared[[col_name]]))
+    cat(sprintf("  %2d. %-30s (%d non-NA values)\n", i, col_name, non_na))
+  }
+}
+
+# ============================================================================
+# STEP 4: CHECK FOR DUPLICATE FIELD-YEAR COMBINATIONS IN SUGARCANE DATA
+# ============================================================================
+cat("\n🔍 CHECKING FOR DUPLICATES IN SUGARCANE DATA:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Check for duplicates
+duplicate_check <- sugarcane_prepared %>%
+  group_by(field, Year) %>%
+  summarise(n_records = n(), .groups = "drop") %>%
+  filter(n_records > 1)
+
+if (nrow(duplicate_check) > 0) {
+  cat("⚠️  Found", nrow(duplicate_check), "field-year combinations with multiple records\n")
+  cat("• Total duplicate records:", sum(duplicate_check$n_records), "\n")
+  
+  # Show some examples
+  cat("\nExamples of duplicates:\n")
+  print(head(duplicate_check, 10))
+  
+  cat("\n🔧 HANDLING DUPLICATES:\n")
+  cat("Strategy: Aggregating numeric columns (mean) and keeping first value for non-numeric\n")
+  
+  # Aggregate duplicates
+  sugarcane_aggregated <- sugarcane_prepared %>%
+    group_by(field, Year, Campaign) %>%
+    summarise(
+      across(where(is.numeric), ~mean(.x, na.rm = TRUE)),
+      across(where(~!is.numeric(.x)), ~first(na.omit(.x))),
+      n_original_records = n(),
+      .groups = "drop"
+    )
+  
+  cat("✅ Duplicates aggregated\n")
+  cat("• Original records:", nrow(sugarcane_prepared), "\n")
+  cat("• After aggregation:", nrow(sugarcane_aggregated), "\n")
+  
+  sugarcane_prepared <- sugarcane_aggregated
+  
+} else {
+  cat("✅ No duplicate field-year combinations found\n")
+  
+  # Add n_original_records column for consistency
+  sugarcane_prepared <- sugarcane_prepared %>%
+    mutate(n_original_records = 1)
+}
+
+# ============================================================================
+# STEP 5: MERGE DATASETS
+# ============================================================================
+cat("\n🔗 MERGING DATASETS:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+cat("Merge strategy: LEFT JOIN (keep all soil records, add sugarcane data where available)\n")
+
+# Create merge key
+soil_data <- soil_data %>%
+  mutate(merge_key = paste(field, Year, sep = "_"))
+
+sugarcane_prepared <- sugarcane_prepared %>%
+  mutate(merge_key = paste(field, Year, sep = "_"))
+
+cat("• Soil records:", nrow(soil_data), "\n")
+cat("• Sugarcane records:", nrow(sugarcane_prepared), "\n")
+cat("• Unique soil merge keys:", length(unique(soil_data$merge_key)), "\n")
+cat("• Unique sugarcane merge keys:", length(unique(sugarcane_prepared$merge_key)), "\n")
+
+# Find matching keys
+matching_keys <- intersect(soil_data$merge_key, sugarcane_prepared$merge_key)
+cat("• Matching merge keys:", length(matching_keys), "\n")
+cat("• Match rate:", round(length(matching_keys) / length(unique(soil_data$merge_key)) * 100, 2), "%\n")
+
+# Prepare sugarcane data for merge (remove duplicate key columns)
+sugarcane_for_merge <- sugarcane_prepared %>%
+  select(-field, -Year) %>%  # These are already in soil_data
+  # Prefix sugarcane columns to avoid conflicts
+  rename_with(~paste0("SC_", .), .cols = -merge_key)
+
+cat("\n🔄 Performing left join...\n")
+
+# Perform the merge
+merged_data <- soil_data %>%
+  left_join(sugarcane_for_merge, by = "merge_key", relationship = "many-to-one")
+
+# Remove temporary merge_key
+merged_data <- merged_data %>%
+  select(-merge_key)
+
+cat("✅ Merge completed\n")
+cat("• Final dataset rows:", nrow(merged_data), "\n")
+cat("• Final dataset columns:", ncol(merged_data), "\n")
+
+# Check how many rows got sugarcane data
+rows_with_sugarcane <- sum(!is.na(merged_data$SC_Campaign))
+cat("• Rows with sugarcane data:", rows_with_sugarcane, 
+    "(", round(rows_with_sugarcane/nrow(merged_data)*100, 2), "%)\n")
+
+# ============================================================================
+# STEP 6: REORDER COLUMNS (SUGARCANE AT END)
+# ============================================================================
+cat("\n📋 REORDERING COLUMNS:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Get soil columns (original) and sugarcane columns (new)
+soil_cols <- intersect(original_columns, colnames(merged_data))
+sugarcane_cols <- colnames(merged_data)[grepl("^SC_", colnames(merged_data))]
+geometry_col <- "geom"
+
+# Reorder: soil columns first, then sugarcane columns, geometry last
+if (geometry_col %in% colnames(merged_data)) {
+  soil_cols <- setdiff(soil_cols, geometry_col)
+  merged_data <- merged_data %>%
+    select(all_of(soil_cols), all_of(sugarcane_cols), all_of(geometry_col))
+} else {
+  merged_data <- merged_data %>%
+    select(all_of(soil_cols), all_of(sugarcane_cols))
+}
+
+cat("✅ Columns reordered\n")
+cat("• Soil columns:", length(soil_cols), "\n")
+cat("• Sugarcane columns:", length(sugarcane_cols), "\n")
+cat("• Total columns:", ncol(merged_data), "\n")
+
+# Show column structure
+cat("\n📊 FINAL COLUMN STRUCTURE:\n")
+cat("First 10 soil columns:\n")
+print(head(soil_cols, 10))
+
+cat("\nSugarcane columns (all prefixed with 'SC_'):\n")
+print(sugarcane_cols)
+
+# ============================================================================
+# STEP 7: GENERATE SUMMARY STATISTICS
+# ============================================================================
+cat("\n📊 GENERATING SUMMARY STATISTICS:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Create summary by year
+summary_by_year <- merged_data %>%
+  st_drop_geometry() %>%
+  group_by(Year) %>%
+  summarise(
+    Total_Records = n(),
+    With_Sugarcane_Data = sum(!is.na(SC_Campaign)),
+    Pct_With_Sugarcane = round(sum(!is.na(SC_Campaign)) / n() * 100, 2),
+    .groups = "drop"
+  ) %>%
+  arrange(Year)
+
+cat("Summary by year:\n")
+print(summary_by_year)
+
+# Overall statistics
+cat("\n📈 OVERALL STATISTICS:\n")
+cat("• Total merged records:", nrow(merged_data), "\n")
+cat("• Records with sugarcane data:", sum(!is.na(merged_data$SC_Campaign)), "\n")
+cat("• Records without sugarcane data:", sum(is.na(merged_data$SC_Campaign)), "\n")
+cat("• Overall match rate:", 
+    round(sum(!is.na(merged_data$SC_Campaign))/nrow(merged_data)*100, 2), "%\n")
+
+# Check for any completely empty sugarcane columns
+empty_sugarcane_cols <- sugarcane_cols[sapply(merged_data[sugarcane_cols], function(x) all(is.na(x)))]
+if (length(empty_sugarcane_cols) > 0) {
+  cat("\n⚠️  Empty sugarcane columns (all NA):\n")
+  print(empty_sugarcane_cols)
+} else {
+  cat("\n✅ All sugarcane columns have at least some data\n")
+}
+
+# ============================================================================
+# STEP 8: SAVE MERGED GEOPACKAGE
+# ============================================================================
+cat("\n💾 SAVING MERGED GEOPACKAGE:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+output_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane.gpkg"
+
+cat("Writing to:", output_path, "\n")
+st_write(merged_data, output_path, delete_dsn = TRUE, quiet = TRUE)
+cat("✅ Merged geopackage saved successfully\n")
+
+# Also save as CSV (attributes only)
+csv_output_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_attributes.csv"
+st_drop_geometry(merged_data) %>% write_csv(csv_output_path)
+cat("✅ CSV attributes saved:", basename(csv_output_path), "\n")
+
+# Save summary statistics
+summary_output_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/MERGE_summary_by_year.csv"
+write_csv(summary_by_year, summary_output_path)
+cat("✅ Summary statistics saved:", basename(summary_output_path), "\n")
+```
+
+# II. CALCULATE GROWING SEASON RAINFALL WITH PRO-RATA FOR PARTIAL MONTHS (To run after Rainfall Data Preprocessing)
+
+Rainfall during the growing season is a critical determinant of crop yield, but calculating it accurately requires more than simple summation. This section addresses the complexity of aggregating monthly rainfall data when planting and harvest dates don't align perfectly with calendar months. The script implements a pro-rata calculation method that proportionally accounts for partial months at the start and end of each growing period. For example, if a crop is planted on October 15th, only the rainfall from the 15th through the 31st of October is counted, appropriately weighted by the number of days. This approach ensures that rainfall totals accurately reflect the water available during each specific growing period, rather than artificially inflating or deflating values by including irrelevant time periods. The output adds several new variables to the dataset including total growing season rainfall, the number of days in the growing season, and average daily rainfall.
+
+```{r}
+# ============================================================================
+# ============================================================================
+# This script calculates total rainfall during the growing season for each
+# parcel, using pro-rata calculation for partial months at start/end dates
+# ============================================================================
+
+library(sf)
+library(terra)
+library(dplyr)
+library(lubridate)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane.gpkg"
+monthly_results_dir <- "batch_matern_kriging_results_extended"
+output_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_growing_season_rainfall.gpkg"
+
+cat("============================================\n")
+cat("  GROWING SEASON RAINFALL CALCULATOR       \n")
+cat("============================================\n\n")
+
+# ============================================================================
+# STEP 1: LOAD PARCELS
+# ============================================================================
+
+cat("Step 1: Loading parcels...\n")
+
+parcels <- st_read(gpkg_path, quiet = TRUE)
+
+cat("  Loaded", nrow(parcels), "records\n")
+
+# Check required columns
+required_cols <- c("field", "SC_planting_date", "SC_harvest_date")
+missing_cols <- setdiff(required_cols, names(parcels))
+
+if (length(missing_cols) > 0) {
+  stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+}
+
+cat("  Required columns found\n\n")
+
+# ============================================================================
+# STEP 2: PARSE AND VALIDATE DATES
+# ============================================================================
+
+cat("Step 2: Parsing dates...\n")
+
+# First, check what format the dates are in
+cat("  Checking date format...\n")
+sample_planting <- head(parcels$SC_planting_date, 3)
+sample_harvest <- head(parcels$SC_harvest_date, 3)
+cat("  Sample planting dates:", paste(sample_planting, collapse = ", "), "\n")
+cat("  Sample harvest dates:", paste(sample_harvest, collapse = ", "), "\n")
+
+# Try multiple date parsing strategies
+parse_flexible_date <- function(date_string) {
+  # If already a Date object, return as is
+  if (inherits(date_string, "Date")) {
+    return(date_string)
+  }
+  
+  # Convert to character if factor
+  date_string <- as.character(date_string)
+  
+  # Try different formats
+  result <- suppressWarnings(dmy(date_string))  # DD/MM/YYYY
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(mdy(date_string))  # MM/DD/YYYY
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(ymd(date_string))  # YYYY-MM-DD
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%d/%m/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%m/%d/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%Y-%m-%d"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string))
+  if (!is.na(result)) return(result)
+  
+  # If all fail, return NA
+  return(as.Date(NA))
+}
+
+# Parse dates with flexible function
+parcels <- parcels %>%
+  mutate(
+    planting_date = sapply(SC_planting_date, parse_flexible_date) %>% as.Date(origin = "1970-01-01"),
+    harvest_date = sapply(SC_harvest_date, parse_flexible_date) %>% as.Date(origin = "1970-01-01")
+  )
+
+# Check for parsing issues
+n_valid <- sum(!is.na(parcels$planting_date) & !is.na(parcels$harvest_date))
+n_invalid <- nrow(parcels) - n_valid
+
+cat("  Valid date pairs:", n_valid, "\n")
+cat("  Invalid date pairs:", n_invalid, "\n")
+
+if (n_invalid > 0) {
+  cat("  Warning: Some records have invalid dates and will be skipped\n")
+  cat("  Example invalid dates:\n")
+  invalid_examples <- parcels %>%
+    filter(is.na(planting_date) | is.na(harvest_date)) %>%
+    select(field, SC_planting_date, SC_harvest_date) %>%
+    head(3)
+  print(invalid_examples)
+}
+
+# Filter to valid dates only
+parcels_valid <- parcels %>%
+  filter(!is.na(planting_date), !is.na(harvest_date), harvest_date > planting_date)
+
+cat("  Working with", nrow(parcels_valid), "valid records\n\n")
+
+# ============================================================================
+# STEP 3: LOAD MONTHLY RASTERS AND CREATE INDEX
+# ============================================================================
+
+cat("Step 3: Loading monthly rainfall rasters...\n")
+
+# Find all monthly folders
+monthly_folders <- list.dirs(monthly_results_dir, recursive = FALSE)
+monthly_folders <- monthly_folders[grepl("month_\\d{4}_\\d{2}", basename(monthly_folders))]
+
+# Function to load var1.pred band only
+load_monthly_raster <- function(folder_path) {
+  utm_path <- file.path(folder_path, "kriging_extended_utm28n.tif")
+  wgs_path <- file.path(folder_path, "kriging_extended_wgs84.tif")
+  
+  raster_path <- NULL
+  if (file.exists(utm_path)) {
+    raster_path <- utm_path
+  } else if (file.exists(wgs_path)) {
+    raster_path <- wgs_path
+  }
+  
+  if (is.null(raster_path)) return(NULL)
+  
+  r <- rast(raster_path)
+  
+  if (nlyr(r) > 1) {
+    band_names <- names(r)
+    pred_band_idx <- which(band_names == "var1.pred")
+    if (length(pred_band_idx) > 0) {
+      r <- r[[pred_band_idx]]
+    } else {
+      r <- r[[1]]
+    }
+  }
+  
+  return(r)
+}
+
+# Create raster index
+raster_index <- data.frame(
+  folder = monthly_folders,
+  basename = basename(monthly_folders),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    year_month = gsub("month_", "", basename),
+    year = as.integer(substr(year_month, 1, 4)),
+    month = as.integer(substr(year_month, 6, 7)),
+    date = as.Date(paste(year, month, "01", sep = "-"))
+  ) %>%
+  arrange(date)
+
+cat("  Found", nrow(raster_index), "monthly rasters\n")
+min_date_str <- format(min(raster_index$date), "%Y-%m")
+max_date_str <- format(max(raster_index$date), "%Y-%m")
+cat("  Date range:", min_date_str, "to", max_date_str, "\n\n")
+
+# Load all rasters into a list
+monthly_rasters <- list()
+cat("  Loading rasters into memory...\n")
+
+for (i in 1:nrow(raster_index)) {
+  r <- load_monthly_raster(raster_index$folder[i])
+  if (!is.null(r)) {
+    key <- format(raster_index$date[i], "%Y-%m")
+    monthly_rasters[[key]] <- r
+    if (i %% 50 == 0) cat("    Loaded", i, "/", nrow(raster_index), "\n")
+  }
+}
+
+cat("  Successfully loaded", length(monthly_rasters), "rasters\n\n")
+
+# ============================================================================
+# STEP 4: CALCULATE GROWING SEASON RAINFALL FOR EACH PARCEL
+# ============================================================================
+
+cat("Step 4: Calculating growing season rainfall...\n")
+
+# Ensure parcels are in same CRS as rasters
+first_raster <- monthly_rasters[[1]]
+parcels_projected <- st_transform(parcels_valid, crs(first_raster))
+
+# Function to calculate pro-rata rainfall for a date range
+calculate_growing_season_rainfall <- function(parcel_geom, planting_date, harvest_date, 
+                                              raster_index, monthly_rasters) {
+  
+  # Get all months in the growing season
+  start_year_month <- floor_date(planting_date, "month")
+  end_year_month <- floor_date(harvest_date, "month")
+  
+  # Generate sequence of months
+  month_seq <- seq(start_year_month, end_year_month, by = "month")
+  
+  total_rainfall <- 0
+  months_processed <- 0
+  
+  for (i in seq_along(month_seq)) {
+    month_date <- as.Date(month_seq[i], origin = "1970-01-01")
+    month_key <- format(month_date, "%Y-%m")
+    
+    # Check if we have data for this month
+    if (!month_key %in% names(monthly_rasters)) {
+      next
+    }
+    
+    # Get the raster
+    month_raster <- monthly_rasters[[month_key]]
+    
+    # Extract rainfall value for this parcel
+    rainfall_value <- terra::extract(
+      month_raster,
+      vect(parcel_geom),
+      fun = mean,
+      na.rm = TRUE
+    )[1, 2]
+    
+    if (is.na(rainfall_value)) {
+      next
+    }
+    
+    # Calculate days in this month
+    days_in_month <- days_in_month(month_date)
+    
+    # Calculate pro-rata factor
+    if (month_date == start_year_month && month_date == end_year_month) {
+      # Both planting and harvest in same month
+      days_used <- as.numeric(harvest_date - planting_date) + 1
+      pro_rata_factor <- days_used / days_in_month
+      
+    } else if (month_date == start_year_month) {
+      # First month (partial)
+      days_used <- days_in_month - day(planting_date) + 1
+      pro_rata_factor <- days_used / days_in_month
+      
+    } else if (month_date == end_year_month) {
+      # Last month (partial)
+      days_used <- day(harvest_date)
+      pro_rata_factor <- days_used / days_in_month
+      
+    } else {
+      # Full month
+      pro_rata_factor <- 1.0
+    }
+    
+    # Add pro-rated rainfall
+    total_rainfall <- total_rainfall + (rainfall_value * pro_rata_factor)
+    months_processed <- months_processed + 1
+  }
+  
+  return(list(
+    total_rainfall = total_rainfall,
+    months_processed = months_processed,
+    growing_days = as.numeric(harvest_date - planting_date) + 1
+  ))
+}
+
+# Process each parcel
+results_list <- list()
+
+cat("  Processing parcels...\n")
+
+for (i in 1:nrow(parcels_projected)) {
+  
+  if (i %% 100 == 0) {
+    cat("    Progress:", i, "/", nrow(parcels_projected), "\n")
+  }
+  
+  result <- calculate_growing_season_rainfall(
+    parcel_geom = parcels_projected[i, ],
+    planting_date = parcels_projected$planting_date[i],
+    harvest_date = parcels_projected$harvest_date[i],
+    raster_index = raster_index,
+    monthly_rasters = monthly_rasters
+  )
+  
+  results_list[[i]] <- data.frame(
+    row_id = i,
+    field = parcels_projected$field[i],
+    growing_season_rainfall_mm = result$total_rainfall,
+    growing_season_days = result$growing_days,
+    months_with_data = result$months_processed,
+    avg_daily_rainfall_mm = result$total_rainfall / result$growing_days
+  )
+}
+
+# Combine results
+results_df <- bind_rows(results_list)
+
+cat("  Completed!\n\n")
+
+# ============================================================================
+# STEP 5: MERGE RESULTS BACK TO ORIGINAL PARCELS
+# ============================================================================
+
+cat("Step 5: Merging results to parcels...\n")
+
+# Add a unique identifier to match exact rows
+parcels_valid$row_num <- 1:nrow(parcels_valid)
+results_df$row_num <- results_df$row_id
+
+# Create results with row matching info
+results_for_merge <- results_df %>%
+  select(row_num, growing_season_rainfall_mm, growing_season_days, 
+         months_with_data, avg_daily_rainfall_mm)
+
+# Add row numbers to original parcels based on valid dates
+parcels <- parcels %>%
+  mutate(
+    planting_date_temp = sapply(SC_planting_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01"),
+    harvest_date_temp = sapply(SC_harvest_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01"),
+    is_valid = !is.na(planting_date_temp) & !is.na(harvest_date_temp) & 
+               harvest_date_temp > planting_date_temp
+  )
+
+# Assign row numbers only to valid parcels
+valid_indices <- which(parcels$is_valid)
+parcels$row_num <- NA_integer_
+parcels$row_num[valid_indices] <- 1:length(valid_indices)
+
+# Merge results only for valid parcels
+parcels_final <- parcels %>%
+  left_join(
+    results_for_merge,
+    by = "row_num"
+  ) %>%
+  select(-planting_date_temp, -harvest_date_temp, -is_valid, -row_num)
+
+# Count results
+n_with_rainfall <- sum(!is.na(parcels_final$growing_season_rainfall_mm))
+n_without_rainfall <- sum(is.na(parcels_final$growing_season_rainfall_mm))
+
+cat("  Merged successfully\n")
+cat("  Records with rainfall data:", n_with_rainfall, "\n")
+cat("  Records without rainfall data (invalid dates):", n_without_rainfall, "\n\n")
+
+# ============================================================================
+# STEP 6: SAVE NEW GEOPACKAGE
+# ============================================================================
+
+cat("Step 6: Saving new geopackage...\n")
+
+st_write(parcels_final, output_gpkg, delete_dsn = TRUE, quiet = TRUE)
+
+cat("  Saved to:", output_gpkg, "\n\n")
+
+# ============================================================================
+# SUMMARY STATISTICS
+# ============================================================================
+
+cat("============================================\n")
+cat("  SUMMARY STATISTICS                       \n")
+cat("============================================\n\n")
+
+summary_stats <- results_df %>%
+  filter(growing_season_rainfall_mm > 0) %>%
+  summarise(
+    n_parcels = n(),
+    mean_rainfall = mean(growing_season_rainfall_mm, na.rm = TRUE),
+    median_rainfall = median(growing_season_rainfall_mm, na.rm = TRUE),
+    min_rainfall = min(growing_season_rainfall_mm, na.rm = TRUE),
+    max_rainfall = max(growing_season_rainfall_mm, na.rm = TRUE),
+    sd_rainfall = sd(growing_season_rainfall_mm, na.rm = TRUE),
+    mean_days = mean(growing_season_days, na.rm = TRUE),
+    mean_daily_rain = mean(avg_daily_rainfall_mm, na.rm = TRUE)
+  )
+
+cat("Parcels processed:", as.character(summary_stats$n_parcels), "\n")
+cat("Growing season rainfall (mm):\n")
+cat("  Mean:", sprintf("%.1f", summary_stats$mean_rainfall), "\n")
+cat("  Median:", sprintf("%.1f", summary_stats$median_rainfall), "\n")
+cat("  Range:", sprintf("%.1f", summary_stats$min_rainfall), "-", 
+    sprintf("%.1f", summary_stats$max_rainfall), "\n")
+cat("  SD:", sprintf("%.1f", summary_stats$sd_rainfall), "\n\n")
+
+cat("Growing season length:\n")
+cat("  Mean days:", sprintf("%.1f", summary_stats$mean_days), "\n")
+cat("  Mean daily rainfall:", sprintf("%.2f", summary_stats$mean_daily_rain), "mm/day\n\n")
+
+# Show examples
+cat("Example parcels:\n")
+examples <- results_df %>%
+  filter(growing_season_rainfall_mm > 0) %>%
+  arrange(desc(growing_season_rainfall_mm)) %>%
+  head(5)
+
+for (i in 1:nrow(examples)) {
+  cat("  Field:", as.character(examples$field[i]), "\n")
+  cat("    Total rainfall:", sprintf("%.1f", examples$growing_season_rainfall_mm[i]), "mm\n")
+  cat("    Growing days:", as.character(examples$growing_season_days[i]), "\n")
+  cat("    Avg daily:", sprintf("%.2f", examples$avg_daily_rainfall_mm[i]), "mm/day\n\n")
+}
+gc()
+```
+
+# III. WEATHER DATA INTEGRATION WITH YIELD-SOIL Data - Geopackage (To run after Weather Data Preprocessing)
+
+Weather conditions during crop development profoundly influence final yield outcomes, often in ways that simple averages cannot capture. This major section integrates comprehensive daily weather data into our geopackage, calculating both standard climate statistics and extreme weather indices over each growing period. The integration is performed in two progressive steps: first calculating basic mean values for temperature, humidity, radiation, and evaporation, then adding sophisticated extreme indices that capture the frequency and intensity of weather events that stress crops. These extreme indices, based on internationally recognized standards from the Expert Team on Climate Change Detection and Indices (ETCCDI), provide crucial information about drought periods, heat waves, heavy rainfall events, and temperature extremes that can dramatically impact sugar accumulation and final tonnage, often explaining yield variations that basic averages miss entirely.
+
+## III.1. Growing Season Weather Aggregation (Basic Means)
+
+This foundational weather integration step calculates straightforward statistical summaries of daily weather variables over each parcel's growing period. For every temperature, humidity, and soil temperature measurement in the daily weather dataset, we compute the mean value experienced from planting to harvest. Additionally, cumulative totals are calculated for precipitation, solar radiation, and evaporation, providing measures of total energy and water inputs during crop development. The script carefully handles date parsing from multiple formats and validates that growing periods fall within the available weather data coverage. These basic statistics serve as essential baseline predictors for yield models while also providing context for interpreting the more sophisticated extreme indices added in the next step.
+
+```{r}
+# ============================================================================
+# INTEGRATE WEATHER DATA INTO GEOPACKAGE WITH GROWING SEASON CALCULATIONS
+# ============================================================================
+# This script adds weather variables calculated over growing periods
+# to the geopackage with rainfall data
+# ============================================================================
+
+library(sf)
+library(dplyr)
+library(lubridate)
+library(readr)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Input geopackage (output from rainfall calculation)
+input_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_growing_season_rainfall.gpkg"
+
+# Weather data file
+weather_file_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/BD_weather_with_ERA5_radiation.csv"
+
+# Output geopackage
+output_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_weather.gpkg"
+
+cat("============================================\n")
+cat("  WEATHER DATA INTEGRATION                 \n")
+cat("============================================\n\n")
+
+# ============================================================================
+# STEP 1: LOAD GEOPACKAGE
+# ============================================================================
+
+cat("Step 1: Loading geopackage...\n")
+
+if (!file.exists(input_gpkg)) {
+  stop("Error: Geopackage not found at: ", input_gpkg)
+}
+
+parcels <- st_read(input_gpkg, quiet = TRUE)
+
+cat("  Loaded", nrow(parcels), "parcels\n")
+cat("  Columns:", ncol(parcels), "\n\n")
+
+# ============================================================================
+# STEP 2: LOAD WEATHER DATA
+# ============================================================================
+
+cat("Step 2: Loading weather data...\n")
+
+if (!file.exists(weather_file_path)) {
+  stop("Error: Weather data file not found at: ", weather_file_path)
+}
+
+# Import weather data with multiple encoding attempts
+weather_data <- NULL
+
+tryCatch({
+  weather_data <- read_csv2(weather_file_path, 
+                           locale = locale(encoding = "UTF-8", decimal_mark = ","), 
+                           show_col_types = FALSE)
+  cat("  ✓ Weather data imported (UTF-8)\n")
+}, error = function(e) {
+  tryCatch({
+    weather_data <<- read_csv2(weather_file_path, 
+                              locale = locale(encoding = "latin1", decimal_mark = ","), 
+                              show_col_types = FALSE)
+    cat("  ✓ Weather data imported (latin1)\n")
+  }, error = function(e2) {
+    tryCatch({
+      weather_data <<- read_csv2(weather_file_path, 
+                                locale = locale(encoding = "CP1252", decimal_mark = ","), 
+                                show_col_types = FALSE)
+      cat("  ✓ Weather data imported (CP1252)\n")
+    }, error = function(e3) {
+      weather_data <<- read.csv(weather_file_path, sep = ";", stringsAsFactors = FALSE, 
+                               encoding = "UTF-8", fileEncoding = "UTF-8")
+      cat("  ✓ Weather data imported (base R)\n")
+    })
+  })
+})
+
+# Clean column names
+if (!is.null(weather_data)) {
+  original_names <- names(weather_data)
+  clean_names <- iconv(original_names, from = "UTF-8", to = "UTF-8", sub = "")
+  clean_names <- gsub("T�\\(C\\)", "T_C", clean_names)
+  clean_names <- gsub("Cl�", "Cle", clean_names)
+  clean_names <- gsub("P�riode", "Periode", clean_names)
+  clean_names <- gsub("D�cade", "Decade", clean_names)
+  clean_names <- gsub("Ann�e", "Annee", clean_names)
+  clean_names <- gsub("S�n�gal", "Senegal", clean_names)
+  clean_names <- gsub("�", "e", clean_names)
+  clean_names <- gsub("�", "a", clean_names)
+  clean_names <- gsub("[^A-Za-z0-9._]", "_", clean_names)
+  clean_names <- gsub("__+", "_", clean_names)
+  clean_names <- gsub("^_|_$", "", clean_names)
+  names(weather_data) <- clean_names
+  cat("  ✓ Column names cleaned\n")
+}
+
+cat("  Weather data:", nrow(weather_data), "records\n")
+cat("  Date range:", as.character(range(weather_data$Date, na.rm = TRUE)), "\n\n")
+
+# ============================================================================
+# STEP 3: PARSE DATES IN PARCELS
+# ============================================================================
+
+cat("Step 3: Parsing dates in parcels...\n")
+
+# Function to parse dates flexibly
+parse_flexible_date <- function(date_string) {
+  if (inherits(date_string, "Date")) return(date_string)
+  date_string <- as.character(date_string)
+  
+  result <- suppressWarnings(dmy(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(mdy(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(ymd(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%d/%m/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%m/%d/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%Y-%m-%d"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string))
+  if (!is.na(result)) return(result)
+  
+  return(as.Date(NA))
+}
+
+# Parse planting and harvest dates
+parcels <- parcels %>%
+  mutate(
+    planting_date = sapply(SC_planting_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01"),
+    harvest_date = sapply(SC_harvest_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01")
+  )
+
+# Check validity
+weather_date_range <- range(weather_data$Date, na.rm = TRUE)
+valid_records <- !is.na(parcels$planting_date) & 
+                 !is.na(parcels$harvest_date) & 
+                 parcels$planting_date < parcels$harvest_date &
+                 parcels$planting_date >= weather_date_range[1] & 
+                 parcels$harvest_date <= weather_date_range[2]
+
+cat("  Valid growing periods:", sum(valid_records), "out of", nrow(parcels), "\n")
+cat("  Date range:", as.character(range(parcels$planting_date[valid_records], na.rm = TRUE)), "to",
+    as.character(range(parcels$harvest_date[valid_records], na.rm = TRUE)), "\n\n")
+
+# ============================================================================
+# STEP 4: CALCULATE WEATHER STATISTICS FOR EACH PARCEL
+# ============================================================================
+
+cat("Step 4: Calculating weather statistics...\n")
+
+# Function to calculate weather statistics for a growing period
+calculate_weather_stats <- function(plant_date, harvest_date, weather_df) {
+  if (is.na(plant_date) || is.na(harvest_date) || plant_date >= harvest_date) {
+    return(list(
+      temp_mini_mean = NA, temp_maxi_mean = NA, temp_moy_mean = NA, ampl_mean = NA,
+      h_mini_mean = NA, h_maxi_mean = NA, h_moy_mean = NA,
+      h_6h_mean = NA, h_12h_mean = NA, h_16h_mean = NA, h_24h_mean = NA,
+      t_6h_10cm_ir_mean = NA, t_16h_10cm_ir_mean = NA,
+      t_6h_20cm_ir_mean = NA, t_16h_20cm_ir_mean = NA,
+      t_6h_30cm_ir_mean = NA, t_16h_30cm_ir_mean = NA,
+      t_6h_50cm_ir_mean = NA, t_16h_50cm_ir_mean = NA,
+      precipitation_weather_total = NA, radiation_total = NA, 
+      radiation_ERA_total = NA, evaporation_total = NA,
+      growing_period_days_weather = NA
+    ))
+  }
+  
+  # Filter weather data for the growing period
+  period_weather <- weather_df[weather_df$Date >= plant_date & weather_df$Date <= harvest_date, ]
+  
+  if (nrow(period_weather) == 0) {
+    return(list(
+      temp_mini_mean = NA, temp_maxi_mean = NA, temp_moy_mean = NA, ampl_mean = NA,
+      h_mini_mean = NA, h_maxi_mean = NA, h_moy_mean = NA,
+      h_6h_mean = NA, h_12h_mean = NA, h_16h_mean = NA, h_24h_mean = NA,
+      t_6h_10cm_ir_mean = NA, t_16h_10cm_ir_mean = NA,
+      t_6h_20cm_ir_mean = NA, t_16h_20cm_ir_mean = NA,
+      t_6h_30cm_ir_mean = NA, t_16h_30cm_ir_mean = NA,
+      t_6h_50cm_ir_mean = NA, t_16h_50cm_ir_mean = NA,
+      precipitation_weather_total = NA, radiation_total = NA, 
+      radiation_ERA_total = NA, evaporation_total = NA,
+      growing_period_days_weather = as.numeric(harvest_date - plant_date)
+    ))
+  }
+  
+  # Calculate statistics
+  stats <- list(
+    # Temperature means
+    temp_mini_mean = mean(period_weather$T_C_mini, na.rm = TRUE),
+    temp_maxi_mean = mean(period_weather$T_C_maxi, na.rm = TRUE),
+    temp_moy_mean = mean(period_weather$T_C_moy, na.rm = TRUE),
+    ampl_mean = mean(period_weather$Ampl, na.rm = TRUE),
+    
+    # Humidity means
+    h_mini_mean = mean(period_weather$H_Mini, na.rm = TRUE),
+    h_maxi_mean = mean(period_weather$H_Maxi, na.rm = TRUE),
+    h_moy_mean = mean(period_weather$H_Moy, na.rm = TRUE),
+    h_6h_mean = mean(period_weather$H_6_h, na.rm = TRUE),
+    h_12h_mean = mean(period_weather$H_12_h, na.rm = TRUE),
+    h_16h_mean = mean(period_weather$H_16_h, na.rm = TRUE),
+    h_24h_mean = mean(period_weather$H_24_h, na.rm = TRUE),
+    
+    # Soil temperature means (irrigated)
+    t_6h_10cm_ir_mean = mean(period_weather$T_6h_10_cm_Ir, na.rm = TRUE),
+    t_16h_10cm_ir_mean = mean(period_weather$T_16h_10_cm_Ir, na.rm = TRUE),
+    t_6h_20cm_ir_mean = mean(period_weather$T_6h_20_cm_Ir, na.rm = TRUE),
+    t_16h_20cm_ir_mean = mean(period_weather$T_16h_20_cm_Ir, na.rm = TRUE),
+    t_6h_30cm_ir_mean = mean(period_weather$T_6h_30_cm_Ir, na.rm = TRUE),
+    t_16h_30cm_ir_mean = mean(period_weather$T_16h_30_cm_Ir, na.rm = TRUE),
+    t_6h_50cm_ir_mean = mean(period_weather$T_6h_50_cm_Ir, na.rm = TRUE),
+    t_16h_50cm_ir_mean = mean(period_weather$T_16h_50_cm_Ir, na.rm = TRUE),
+    
+    # Accumulations (note: renamed precipitation to avoid conflict)
+    precipitation_weather_total = sum(period_weather$precipitation_stations_mean, na.rm = TRUE),
+    radiation_total = sum(period_weather$Radiation, na.rm = TRUE),
+    radiation_ERA_total = sum(period_weather$Radiation_ERA, na.rm = TRUE),
+    evaporation_total = sum(period_weather$Ev_C2, na.rm = TRUE),
+    
+    # Growing period length
+    growing_period_days_weather = as.numeric(harvest_date - plant_date)
+  )
+  
+  # Convert NaN to NA
+  stats <- lapply(stats, function(x) if(is.nan(x)) NA else x)
+  
+  return(stats)
+}
+
+# Initialize weather variables dataframe
+n_total <- nrow(parcels)
+weather_vars <- data.frame(
+  temp_mini_mean = rep(NA_real_, n_total),
+  temp_maxi_mean = rep(NA_real_, n_total),
+  temp_moy_mean = rep(NA_real_, n_total),
+  ampl_mean = rep(NA_real_, n_total),
+  h_mini_mean = rep(NA_real_, n_total),
+  h_maxi_mean = rep(NA_real_, n_total),
+  h_moy_mean = rep(NA_real_, n_total),
+  h_6h_mean = rep(NA_real_, n_total),
+  h_12h_mean = rep(NA_real_, n_total),
+  h_16h_mean = rep(NA_real_, n_total),
+  h_24h_mean = rep(NA_real_, n_total),
+  t_6h_10cm_ir_mean = rep(NA_real_, n_total),
+  t_16h_10cm_ir_mean = rep(NA_real_, n_total),
+  t_6h_20cm_ir_mean = rep(NA_real_, n_total),
+  t_16h_20cm_ir_mean = rep(NA_real_, n_total),
+  t_6h_30cm_ir_mean = rep(NA_real_, n_total),
+  t_16h_30cm_ir_mean = rep(NA_real_, n_total),
+  t_6h_50cm_ir_mean = rep(NA_real_, n_total),
+  t_16h_50cm_ir_mean = rep(NA_real_, n_total),
+  precipitation_weather_total = rep(NA_real_, n_total),
+  radiation_total = rep(NA_real_, n_total),
+  radiation_ERA_total = rep(NA_real_, n_total),
+  evaporation_total = rep(NA_real_, n_total),
+  growing_period_days_weather = rep(NA_real_, n_total)
+)
+
+# Process each parcel
+chunk_size <- ceiling(n_total / 10)
+
+for (i in 1:n_total) {
+  if (i %% chunk_size == 0 || i == n_total) {
+    cat("  Processing:", i, "/", n_total, "(", round(100*i/n_total, 1), "%)\n")
+  }
+  
+  stats <- calculate_weather_stats(
+    plant_date = parcels$planting_date[i],
+    harvest_date = parcels$harvest_date[i],
+    weather_df = weather_data
+  )
+  
+  # Assign results
+  for (var_name in names(stats)) {
+    weather_vars[i, var_name] <- stats[[var_name]]
+  }
+}
+
+cat("  Completed!\n\n")
+
+# ============================================================================
+# STEP 5: MERGE WEATHER DATA WITH PARCELS
+# ============================================================================
+
+cat("Step 5: Merging weather data with parcels...\n")
+
+# Combine parcels with weather variables
+parcels_with_weather <- cbind(
+  parcels %>% select(-planting_date, -harvest_date),  # Remove temp date columns
+  weather_vars
+)
+
+# Count successful calculations
+n_with_weather <- sum(!is.na(weather_vars$growing_period_days_weather))
+
+cat("  Records with weather data:", n_with_weather, "\n")
+cat("  Records without weather data:", n_total - n_with_weather, "\n")
+cat("  Total columns in output:", ncol(parcels_with_weather), "\n\n")
+
+# ============================================================================
+# STEP 6: SAVE OUTPUT GEOPACKAGE
+# ============================================================================
+
+cat("Step 6: Saving output geopackage...\n")
+
+st_write(parcels_with_weather, output_gpkg, delete_dsn = TRUE, quiet = TRUE)
+
+cat("  Saved to:", output_gpkg, "\n\n")
+
+# ============================================================================
+# SUMMARY STATISTICS
+# ============================================================================
+
+cat("============================================\n")
+cat("  SUMMARY STATISTICS                       \n")
+cat("============================================\n\n")
+
+valid_weather <- weather_vars %>%
+  filter(!is.na(growing_period_days_weather))
+
+if (nrow(valid_weather) > 0) {
+  cat("Valid weather calculations:", nrow(valid_weather), "\n\n")
+  
+  cat("Temperature statistics (°C):\n")
+  cat("  Mean minimum:", sprintf("%.2f", mean(valid_weather$temp_mini_mean, na.rm = TRUE)), "\n")
+  cat("  Mean maximum:", sprintf("%.2f", mean(valid_weather$temp_maxi_mean, na.rm = TRUE)), "\n")
+  cat("  Mean average:", sprintf("%.2f", mean(valid_weather$temp_moy_mean, na.rm = TRUE)), "\n\n")
+  
+  cat("Humidity statistics (%):\n")
+  cat("  Mean minimum:", sprintf("%.1f", mean(valid_weather$h_mini_mean, na.rm = TRUE)), "\n")
+  cat("  Mean maximum:", sprintf("%.1f", mean(valid_weather$h_maxi_mean, na.rm = TRUE)), "\n")
+  cat("  Mean average:", sprintf("%.1f", mean(valid_weather$h_moy_mean, na.rm = TRUE)), "\n\n")
+  
+  cat("Accumulation statistics:\n")
+  cat("  Mean precipitation:", sprintf("%.1f", mean(valid_weather$precipitation_weather_total, na.rm = TRUE)), "mm\n")
+  cat("  Mean radiation:", sprintf("%.1f", mean(valid_weather$radiation_total, na.rm = TRUE)), "\n")
+  cat("  Mean ERA5 radiation:", sprintf("%.1f", mean(valid_weather$radiation_ERA_total, na.rm = TRUE)), "\n")
+  cat("  Mean evaporation:", sprintf("%.1f", mean(valid_weather$evaporation_total, na.rm = TRUE)), "mm\n\n")
+  
+  cat("Growing period length:\n")
+  cat("  Mean:", sprintf("%.1f", mean(valid_weather$growing_period_days_weather, na.rm = TRUE)), "days\n")
+  cat("  Range:", sprintf("%.0f", min(valid_weather$growing_period_days_weather, na.rm = TRUE)), "-",
+      sprintf("%.0f", max(valid_weather$growing_period_days_weather, na.rm = TRUE)), "days\n\n")
+}
+cat("Output file:", output_gpkg, "\n")
+```
+
+## III.2. Extreme Weather Indices Integration
+
+While average weather conditions matter, crops often respond more strongly to extreme events that occur during critical growth phases. This advanced section calculates nine extreme rainfall indices and five extreme temperature indices that capture the character and intensity of weather extremes during each growing season. The rainfall indices identify patterns like consecutive dry days that cause drought stress, maximum rainfall over short periods that can cause waterlogging, and the contribution of extreme precipitation events to total water availability. Temperature indices quantify heat stress by counting hot days above critical thresholds and recording the absolute temperature extremes experienced. These indices are particularly valuable for machine learning models because they capture non-linear relationships between weather and yield that mean values cannot represent, often improving prediction accuracy by ten to thirty percent in agricultural applications. The calculations use robust statistical methods including percentile-based thresholds and rolling window maximums to ensure indices are meaningful across different growing seasons and conditions.
+
+```{r}
+# ============================================================================
+# INTEGRATE WEATHER DATA WITH EXTREME INDICES INTO GEOPACKAGE
+# ============================================================================
+# This script adds weather variables AND extreme weather indices calculated 
+# over growing periods to the geopackage with rainfall data
+# ============================================================================
+
+library(sf)
+library(dplyr)
+library(lubridate)
+library(readr)
+library(zoo)  # For rolling calculations
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Input geopackage (output from rainfall calculation)
+input_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_growing_season_rainfall.gpkg"
+
+# Weather data file
+weather_file_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/BD_weather_with_ERA5_radiation.csv"
+
+# Output geopackage
+output_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_weather_extreme_indices.gpkg"
+
+cat("============================================\n")
+cat("  WEATHER DATA WITH EXTREME INDICES        \n")
+cat("============================================\n\n")
+
+# ============================================================================
+# STEP 1: LOAD GEOPACKAGE
+# ============================================================================
+
+cat("Step 1: Loading geopackage...\n")
+
+if (!file.exists(input_gpkg)) {
+  stop("Error: Geopackage not found at: ", input_gpkg)
+}
+
+parcels <- st_read(input_gpkg, quiet = TRUE)
+
+cat("  Loaded", nrow(parcels), "parcels\n")
+cat("  Columns:", ncol(parcels), "\n\n")
+
+# ============================================================================
+# STEP 2: LOAD WEATHER DATA
+# ============================================================================
+
+cat("Step 2: Loading weather data...\n")
+
+if (!file.exists(weather_file_path)) {
+  stop("Error: Weather data file not found at: ", weather_file_path)
+}
+
+# Import weather data with multiple encoding attempts
+weather_data <- NULL
+
+tryCatch({
+  weather_data <- read_csv2(weather_file_path, 
+                           locale = locale(encoding = "UTF-8", decimal_mark = ","), 
+                           show_col_types = FALSE)
+  cat("  ✓ Weather data imported (UTF-8)\n")
+}, error = function(e) {
+  tryCatch({
+    weather_data <<- read_csv2(weather_file_path, 
+                              locale = locale(encoding = "latin1", decimal_mark = ","), 
+                              show_col_types = FALSE)
+    cat("  ✓ Weather data imported (latin1)\n")
+  }, error = function(e2) {
+    tryCatch({
+      weather_data <<- read_csv2(weather_file_path, 
+                                locale = locale(encoding = "CP1252", decimal_mark = ","), 
+                                show_col_types = FALSE)
+      cat("  ✓ Weather data imported (CP1252)\n")
+    }, error = function(e3) {
+      weather_data <<- read.csv(weather_file_path, sep = ";", stringsAsFactors = FALSE, 
+                               encoding = "UTF-8", fileEncoding = "UTF-8")
+      cat("  ✓ Weather data imported (base R)\n")
+    })
+  })
+})
+
+# Clean column names
+if (!is.null(weather_data)) {
+  original_names <- names(weather_data)
+  clean_names <- iconv(original_names, from = "UTF-8", to = "UTF-8", sub = "")
+  clean_names <- gsub("T�\\(C\\)", "T_C", clean_names)
+  clean_names <- gsub("Cl�", "Cle", clean_names)
+  clean_names <- gsub("P�riode", "Periode", clean_names)
+  clean_names <- gsub("D�cade", "Decade", clean_names)
+  clean_names <- gsub("Ann�e", "Annee", clean_names)
+  clean_names <- gsub("S�n�gal", "Senegal", clean_names)
+  clean_names <- gsub("�", "e", clean_names)
+  clean_names <- gsub("�", "a", clean_names)
+  clean_names <- gsub("[^A-Za-z0-9._]", "_", clean_names)
+  clean_names <- gsub("__+", "_", clean_names)
+  clean_names <- gsub("^_|_$", "", clean_names)
+  names(weather_data) <- clean_names
+  cat("  ✓ Column names cleaned\n")
+}
+
+cat("  Weather data:", nrow(weather_data), "records\n")
+cat("  Date range:", as.character(range(weather_data$Date, na.rm = TRUE)), "\n\n")
+
+# ============================================================================
+# STEP 3: PARSE DATES IN PARCELS
+# ============================================================================
+
+cat("Step 3: Parsing dates in parcels...\n")
+
+# Function to parse dates flexibly
+parse_flexible_date <- function(date_string) {
+  if (inherits(date_string, "Date")) return(date_string)
+  date_string <- as.character(date_string)
+  
+  result <- suppressWarnings(dmy(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(mdy(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(ymd(date_string))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%d/%m/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%m/%d/%Y"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string, format = "%Y-%m-%d"))
+  if (!is.na(result)) return(result)
+  
+  result <- suppressWarnings(as.Date(date_string))
+  if (!is.na(result)) return(result)
+  
+  return(as.Date(NA))
+}
+
+# Parse planting and harvest dates
+parcels <- parcels %>%
+  mutate(
+    planting_date = sapply(SC_planting_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01"),
+    harvest_date = sapply(SC_harvest_date, parse_flexible_date) %>% 
+      as.Date(origin = "1970-01-01")
+  )
+
+# Check validity
+weather_date_range <- range(weather_data$Date, na.rm = TRUE)
+valid_records <- !is.na(parcels$planting_date) & 
+                 !is.na(parcels$harvest_date) & 
+                 parcels$planting_date < parcels$harvest_date &
+                 parcels$planting_date >= weather_date_range[1] & 
+                 parcels$harvest_date <= weather_date_range[2]
+
+cat("  Valid growing periods:", sum(valid_records), "out of", nrow(parcels), "\n")
+cat("  Date range:", as.character(range(parcels$planting_date[valid_records], na.rm = TRUE)), "to",
+    as.character(range(parcels$harvest_date[valid_records], na.rm = TRUE)), "\n\n")
+
+# ============================================================================
+# STEP 4: HELPER FUNCTIONS FOR EXTREME INDICES
+# ============================================================================
+
+# Function to calculate consecutive days
+calc_consecutive_days <- function(condition_vector) {
+  if (length(condition_vector) == 0 || all(is.na(condition_vector))) return(0)
+  
+  # Replace NA with FALSE for consecutive calculation
+  condition_clean <- ifelse(is.na(condition_vector), FALSE, condition_vector)
+  
+  if (!any(condition_clean)) return(0)
+  
+  # Calculate runs of TRUE values
+  rle_result <- rle(condition_clean)
+  max_consecutive <- max(rle_result$lengths[rle_result$values], na.rm = TRUE)
+  
+  return(ifelse(is.finite(max_consecutive), max_consecutive, 0))
+}
+
+# Function to calculate rolling maximum for n-day rainfall
+calc_rolling_max <- function(values, n) {
+  if (length(values) < n || all(is.na(values))) return(NA)
+  
+  # Replace NA with 0 for precipitation calculations
+  values_clean <- ifelse(is.na(values), 0, values)
+  
+  if (length(values_clean) < n) return(sum(values_clean, na.rm = TRUE))
+  
+  # Calculate rolling sums and find maximum
+  rolling_sums <- zoo::rollsum(values_clean, k = n, align = "left", fill = NA)
+  return(max(rolling_sums, na.rm = TRUE))
+}
+
+# ============================================================================
+# STEP 5: ENHANCED WEATHER CALCULATION FUNCTION WITH EXTREME INDICES
+# ============================================================================
+
+cat("Step 4: Setting up enhanced weather calculation function...\n")
+
+# Enhanced function to calculate all weather statistics including extreme indices
+calculate_enhanced_weather_stats <- function(plant_date, harvest_date, weather_df) {
+  if (is.na(plant_date) || is.na(harvest_date) || plant_date >= harvest_date) {
+    return(list(
+      # Basic temperature means
+      temp_mini_mean = NA, temp_maxi_mean = NA, temp_moy_mean = NA, ampl_mean = NA,
+      # Humidity means  
+      h_mini_mean = NA, h_maxi_mean = NA, h_moy_mean = NA,
+      h_6h_mean = NA, h_12h_mean = NA, h_16h_mean = NA, h_24h_mean = NA,
+      # Simplified soil temperature means
+      soil_temp_6h_mean = NA, soil_temp_16h_mean = NA,
+      # Basic accumulations
+      precipitation_weather_total = NA, radiation_total = NA, 
+      radiation_ERA_total = NA, evaporation_total = NA,
+      growing_period_days_weather = NA,
+      
+      # EXTREME RAINFALL INDICES (ERI)
+      CWD = NA,  # Consecutive wet days
+      CDD = NA,  # Consecutive dry days  
+      SDII = NA, # Simple daily rainfall intensity
+      R10 = NA,  # Heavy rainfall days (≥10mm)
+      R20 = NA,  # Very heavy rainfall days (≥20mm)
+      Rx1 = NA,  # Max 1-day rainfall
+      Rx5 = NA,  # Max 5-day rainfall
+      R95p = NA, # Extremely wet days (>95th percentile)
+      R99p = NA, # Extremely wet days (>99th percentile)
+      
+      # EXTREME TEMPERATURE INDICES (ETI)
+      HD = NA,   # Hot days (>35°C)
+      TNn = NA,  # Minimum daily minimum temperature
+      TNx = NA,  # Maximum daily minimum temperature
+      TXn = NA,  # Minimum daily maximum temperature
+      TXx = NA   # Maximum daily maximum temperature
+    ))
+  }
+  
+  # Filter weather data for the growing period
+  period_weather <- weather_df[weather_df$Date >= plant_date & weather_df$Date <= harvest_date, ]
+  
+  if (nrow(period_weather) == 0) {
+    return(list(
+      temp_mini_mean = NA, temp_maxi_mean = NA, temp_moy_mean = NA, ampl_mean = NA,
+      h_mini_mean = NA, h_maxi_mean = NA, h_moy_mean = NA,
+      h_6h_mean = NA, h_12h_mean = NA, h_16h_mean = NA, h_24h_mean = NA,
+      soil_temp_6h_mean = NA, soil_temp_16h_mean = NA,
+      precipitation_weather_total = NA, radiation_total = NA, 
+      radiation_ERA_total = NA, evaporation_total = NA,
+      growing_period_days_weather = as.numeric(harvest_date - plant_date),
+      CWD = NA, CDD = NA, SDII = NA, R10 = NA, R20 = NA, Rx1 = NA, Rx5 = NA, R95p = NA, R99p = NA,
+      HD = NA, TNn = NA, TNx = NA, TXn = NA, TXx = NA
+    ))
+  }
+  
+  # Basic calculations
+  precip <- period_weather$precipitation_stations_mean
+  temp_min <- period_weather$T_C_mini
+  temp_max <- period_weather$T_C_maxi
+  
+  # Replace NA precipitation with 0 for most calculations
+  precip_clean <- ifelse(is.na(precip), 0, precip)
+  
+  # Calculate simplified soil temperature means
+  # Average all soil depths at 6h
+  soil_6h_temps <- cbind(
+    period_weather$T_6h_10_cm_Ir,
+    period_weather$T_6h_20_cm_Ir,
+    period_weather$T_6h_30_cm_Ir,
+    period_weather$T_6h_50_cm_Ir
+  )
+  soil_temp_6h_mean <- mean(soil_6h_temps, na.rm = TRUE)
+  
+  # Average all soil depths at 16h
+  soil_16h_temps <- cbind(
+    period_weather$T_16h_10_cm_Ir,
+    period_weather$T_16h_20_cm_Ir,
+    period_weather$T_16h_30_cm_Ir,
+    period_weather$T_16h_50_cm_Ir
+  )
+  soil_temp_16h_mean <- mean(soil_16h_temps, na.rm = TRUE)
+  
+  # ===== BASIC STATISTICS =====
+  basic_stats <- list(
+    # Temperature means
+    temp_mini_mean = mean(temp_min, na.rm = TRUE),
+    temp_maxi_mean = mean(temp_max, na.rm = TRUE),
+    temp_moy_mean = mean(period_weather$T_C_moy, na.rm = TRUE),
+    ampl_mean = mean(period_weather$Ampl, na.rm = TRUE),
+    
+    # Humidity means
+    h_mini_mean = mean(period_weather$H_Mini, na.rm = TRUE),
+    h_maxi_mean = mean(period_weather$H_Maxi, na.rm = TRUE),
+    h_moy_mean = mean(period_weather$H_Moy, na.rm = TRUE),
+    h_6h_mean = mean(period_weather$H_6_h, na.rm = TRUE),
+    h_12h_mean = mean(period_weather$H_12_h, na.rm = TRUE),
+    h_16h_mean = mean(period_weather$H_16_h, na.rm = TRUE),
+    h_24h_mean = mean(period_weather$H_24_h, na.rm = TRUE),
+    
+    # Simplified soil temperature means
+    soil_temp_6h_mean = soil_temp_6h_mean,
+    soil_temp_16h_mean = soil_temp_16h_mean,
+    
+    # Basic accumulations (renamed to avoid conflicts)
+    precipitation_weather_total = sum(precip_clean, na.rm = TRUE),
+    radiation_total = sum(period_weather$Radiation, na.rm = TRUE),
+    radiation_ERA_total = sum(period_weather$Radiation_ERA, na.rm = TRUE),
+    evaporation_total = sum(period_weather$Ev_C2, na.rm = TRUE),
+    growing_period_days_weather = as.numeric(harvest_date - plant_date)
+  )
+  
+  # ===== EXTREME RAINFALL INDICES (ERI) =====
+  
+  # CWD: Consecutive wet days (≥1mm)
+  wet_days <- precip_clean >= 1
+  CWD <- calc_consecutive_days(wet_days)
+  
+  # CDD: Consecutive dry days (<1mm)
+  dry_days <- precip_clean < 1
+  CDD <- calc_consecutive_days(dry_days)
+  
+  # SDII: Simple daily rainfall intensity (total rainfall / wet days)
+  wet_day_count <- sum(precip_clean >= 1, na.rm = TRUE)
+  total_precip <- sum(precip_clean, na.rm = TRUE)
+  SDII <- ifelse(wet_day_count > 0, total_precip / wet_day_count, NA)
+  
+  # R10: Heavy rainfall days (≥10mm)
+  R10 <- sum(precip_clean >= 10, na.rm = TRUE)
+  
+  # R20: Very heavy rainfall days (≥20mm)
+  R20 <- sum(precip_clean >= 20, na.rm = TRUE)
+  
+  # Rx1: Max 1-day rainfall
+  Rx1 <- max(precip_clean, na.rm = TRUE)
+  Rx1 <- ifelse(is.finite(Rx1), Rx1, NA)
+  
+  # Rx5: Max 5-day rainfall
+  Rx5 <- calc_rolling_max(precip_clean, 5)
+  
+  # Calculate percentiles for the growing season (only for days with precipitation > 0)
+  wet_precip <- precip_clean[precip_clean > 0]
+  if (length(wet_precip) >= 5) {  # Need at least 5 wet days for meaningful percentiles
+    p95 <- quantile(wet_precip, 0.95, na.rm = TRUE)
+    p99 <- quantile(wet_precip, 0.99, na.rm = TRUE)
+    
+    # R95p: Total rainfall on extremely wet days (>95th percentile)
+    R95p <- sum(precip_clean[precip_clean > p95], na.rm = TRUE)
+    
+    # R99p: Total rainfall on extremely wet days (>99th percentile)  
+    R99p <- sum(precip_clean[precip_clean > p99], na.rm = TRUE)
+  } else {
+    R95p <- NA
+    R99p <- NA
+  }
+  
+  # ===== EXTREME TEMPERATURE INDICES (ETI) =====
+  
+  # HD: Hot days (maximum temperature > 35°C)
+  HD <- sum(temp_max > 35, na.rm = TRUE)
+  
+  # Temperature extremes
+  TNn <- min(temp_min, na.rm = TRUE)  # Minimum daily minimum temperature
+  TNx <- max(temp_min, na.rm = TRUE)  # Maximum daily minimum temperature
+  TXn <- min(temp_max, na.rm = TRUE)  # Minimum daily maximum temperature
+  TXx <- max(temp_max, na.rm = TRUE)  # Maximum daily maximum temperature
+  
+  # Handle infinite values
+  TNn <- ifelse(is.finite(TNn), TNn, NA)
+  TNx <- ifelse(is.finite(TNx), TNx, NA)
+  TXn <- ifelse(is.finite(TXn), TXn, NA)
+  TXx <- ifelse(is.finite(TXx), TXx, NA)
+  
+  # Combine all statistics
+  extreme_stats <- list(
+    CWD = CWD, CDD = CDD, SDII = SDII, R10 = R10, R20 = R20,
+    Rx1 = Rx1, Rx5 = Rx5, R95p = R95p, R99p = R99p,
+    HD = HD, TNn = TNn, TNx = TNx, TXn = TXn, TXx = TXx
+  )
+  
+  # Convert NaN to NA for cleaner output
+  all_stats <- c(basic_stats, extreme_stats)
+  all_stats <- lapply(all_stats, function(x) if(is.nan(x)) NA else x)
+  
+  return(all_stats)
+}
+
+cat("  ✓ Enhanced calculation function ready\n\n")
+
+# ============================================================================
+# STEP 6: CALCULATE ENHANCED WEATHER STATISTICS FOR EACH PARCEL
+# ============================================================================
+
+cat("Step 5: Calculating enhanced weather statistics with extreme indices...\n")
+
+# Initialize enhanced weather variables dataframe
+n_total <- nrow(parcels)
+enhanced_weather_vars <- data.frame(
+  # Basic variables
+  temp_mini_mean = rep(NA_real_, n_total),
+  temp_maxi_mean = rep(NA_real_, n_total),
+  temp_moy_mean = rep(NA_real_, n_total),
+  ampl_mean = rep(NA_real_, n_total),
+  h_mini_mean = rep(NA_real_, n_total),
+  h_maxi_mean = rep(NA_real_, n_total),
+  h_moy_mean = rep(NA_real_, n_total),
+  h_6h_mean = rep(NA_real_, n_total),
+  h_12h_mean = rep(NA_real_, n_total),
+  h_16h_mean = rep(NA_real_, n_total),
+  h_24h_mean = rep(NA_real_, n_total),
+  # Simplified soil temperature variables
+  soil_temp_6h_mean = rep(NA_real_, n_total),
+  soil_temp_16h_mean = rep(NA_real_, n_total),
+  precipitation_weather_total = rep(NA_real_, n_total),
+  radiation_total = rep(NA_real_, n_total),
+  radiation_ERA_total = rep(NA_real_, n_total),
+  evaporation_total = rep(NA_real_, n_total),
+  growing_period_days_weather = rep(NA_real_, n_total),
+  
+  # Extreme Rainfall Indices (ERI)
+  CWD = rep(NA_real_, n_total),   # Consecutive wet days
+  CDD = rep(NA_real_, n_total),   # Consecutive dry days
+  SDII = rep(NA_real_, n_total),  # Simple daily intensity index
+  R10 = rep(NA_real_, n_total),   # Heavy rainfall days
+  R20 = rep(NA_real_, n_total),   # Very heavy rainfall days
+  Rx1 = rep(NA_real_, n_total),   # Max 1-day rainfall
+  Rx5 = rep(NA_real_, n_total),   # Max 5-day rainfall
+  R95p = rep(NA_real_, n_total),  # Extremely wet days (95th percentile)
+  R99p = rep(NA_real_, n_total),  # Extremely wet days (99th percentile)
+  
+  # Extreme Temperature Indices (ETI)
+  HD = rep(NA_real_, n_total),    # Hot days
+  TNn = rep(NA_real_, n_total),   # Minimum daily minimum temperature
+  TNx = rep(NA_real_, n_total),   # Maximum daily minimum temperature
+  TXn = rep(NA_real_, n_total),   # Minimum daily maximum temperature
+  TXx = rep(NA_real_, n_total)    # Maximum daily maximum temperature
+)
+
+# Process each parcel with progress tracking
+chunk_size <- ceiling(n_total / 10)
+start_time <- Sys.time()
+
+for (i in 1:n_total) {
+  if (i %% chunk_size == 0 || i == n_total) {
+    elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "mins"))
+    remaining <- (elapsed / i) * (n_total - i)
+    cat("  Processing:", i, "/", n_total, "(", round(100*i/n_total, 1), "%) - ",
+        "Elapsed:", round(elapsed, 1), "min, Est. remaining:", round(remaining, 1), "min\n")
+  }
+  
+  stats <- calculate_enhanced_weather_stats(
+    plant_date = parcels$planting_date[i],
+    harvest_date = parcels$harvest_date[i],
+    weather_df = weather_data
+  )
+  
+  # Assign results
+  for (var_name in names(stats)) {
+    if (var_name %in% names(enhanced_weather_vars)) {
+      enhanced_weather_vars[i, var_name] <- stats[[var_name]]
+    }
+  }
+}
+
+total_time <- as.numeric(difftime(Sys.time(), start_time, units = "mins"))
+cat("  Total processing time:", round(total_time, 1), "minutes\n")
+cat("  Completed!\n\n")
+
+# ============================================================================
+# STEP 7: MERGE ENHANCED WEATHER DATA WITH PARCELS
+# ============================================================================
+
+cat("Step 6: Merging enhanced weather data with parcels...\n")
+
+# Combine parcels with enhanced weather variables
+parcels_with_enhanced_weather <- cbind(
+  parcels %>% select(-planting_date, -harvest_date),  # Remove temp date columns
+  enhanced_weather_vars
+)
+
+# Count successful calculations
+n_with_weather <- sum(!is.na(enhanced_weather_vars$growing_period_days_weather))
+
+cat("  Records with weather data:", n_with_weather, "\n")
+cat("  Records without weather data:", n_total - n_with_weather, "\n")
+cat("  Total columns in output:", ncol(parcels_with_enhanced_weather), "\n\n")
+
+# ============================================================================
+# STEP 8: SAVE OUTPUT GEOPACKAGE
+# ============================================================================
+
+cat("Step 7: Saving output geopackage...\n")
+
+st_write(parcels_with_enhanced_weather, output_gpkg, delete_dsn = TRUE, quiet = TRUE)
+
+cat("  Saved to:", output_gpkg, "\n\n")
+
+# ============================================================================
+# COMPREHENSIVE SUMMARY STATISTICS
+# ============================================================================
+
+cat("============================================\n")
+cat("  COMPREHENSIVE SUMMARY STATISTICS         \n")
+cat("============================================\n\n")
+
+valid_weather <- enhanced_weather_vars %>%
+  filter(!is.na(growing_period_days_weather))
+
+if (nrow(valid_weather) > 0) {
+  cat("Valid weather calculations:", nrow(valid_weather), "\n\n")
+  
+  cat("--- BASIC CLIMATE STATISTICS ---\n")
+  cat("Temperature statistics (°C):\n")
+  cat("  Mean minimum:", sprintf("%.2f", mean(valid_weather$temp_mini_mean, na.rm = TRUE)), "\n")
+  cat("  Mean maximum:", sprintf("%.2f", mean(valid_weather$temp_maxi_mean, na.rm = TRUE)), "\n")
+  cat("  Mean average:", sprintf("%.2f", mean(valid_weather$temp_moy_mean, na.rm = TRUE)), "\n\n")
+  
+  cat("Humidity statistics (%):\n")
+  cat("  Mean minimum:", sprintf("%.1f", mean(valid_weather$h_mini_mean, na.rm = TRUE)), "\n")
+  cat("  Mean maximum:", sprintf("%.1f", mean(valid_weather$h_maxi_mean, na.rm = TRUE)), "\n")
+  cat("  Mean average:", sprintf("%.1f", mean(valid_weather$h_moy_mean, na.rm = TRUE)), "\n\n")
+  
+  cat("Soil temperature (°C):\n")
+  cat("  6h mean:", sprintf("%.2f", mean(valid_weather$soil_temp_6h_mean, na.rm = TRUE)), "\n")
+  cat("  16h mean:", sprintf("%.2f", mean(valid_weather$soil_temp_16h_mean, na.rm = TRUE)), "\n\n")
+  
+  cat("Accumulation statistics:\n")
+  cat("  Mean precipitation:", sprintf("%.1f", mean(valid_weather$precipitation_weather_total, na.rm = TRUE)), "mm\n")
+  cat("  Mean radiation:", sprintf("%.1f", mean(valid_weather$radiation_total, na.rm = TRUE)), "\n")
+  cat("  Mean ERA5 radiation:", sprintf("%.1f", mean(valid_weather$radiation_ERA_total, na.rm = TRUE)), "\n")
+  cat("  Mean evaporation:", sprintf("%.1f", mean(valid_weather$evaporation_total, na.rm = TRUE)), "mm\n\n")
+  
+  cat("--- EXTREME RAINFALL INDICES (ERI) ---\n")
+  eri_vars <- c("CWD", "CDD", "SDII", "R10", "R20", "Rx1", "Rx5", "R95p", "R99p")
+  eri_descriptions <- c(
+    "CWD" = "Consecutive wet days",
+    "CDD" = "Consecutive dry days",
+    "SDII" = "Daily intensity index (mm/day)",
+    "R10" = "Heavy rainfall days (≥10mm)",
+    "R20" = "Very heavy rainfall days (≥20mm)",
+    "Rx1" = "Max 1-day rainfall (mm)",
+    "Rx5" = "Max 5-day rainfall (mm)",
+    "R95p" = "Total rainfall >95th percentile (mm)",
+    "R99p" = "Total rainfall >99th percentile (mm)"
+  )
+  
+  for (var in eri_vars) {
+    if (var %in% names(valid_weather)) {
+      valid_vals <- valid_weather[[var]][!is.na(valid_weather[[var]])]
+      if (length(valid_vals) > 0) {
+        cat(sprintf("%-4s %-40s Mean=%7.2f, Range=[%7.2f, %7.2f]\n", 
+                    var, paste0("(", eri_descriptions[[var]], "):"),
+                    mean(valid_vals), min(valid_vals), max(valid_vals)))
+      }
+    }
+  }
+  cat("\n")
+  
+  cat("--- EXTREME TEMPERATURE INDICES (ETI) ---\n")
+  eti_vars <- c("HD", "TNn", "TNx", "TXn", "TXx")
+  eti_descriptions <- c(
+    "HD" = "Hot days (>35°C)",
+    "TNn" = "Min daily min temperature (°C)",
+    "TNx" = "Max daily min temperature (°C)",
+    "TXn" = "Min daily max temperature (°C)",
+    "TXx" = "Max daily max temperature (°C)"
+  )
+  
+  for (var in eti_vars) {
+    if (var %in% names(valid_weather)) {
+      valid_vals <- valid_weather[[var]][!is.na(valid_weather[[var]])]
+      if (length(valid_vals) > 0) {
+        cat(sprintf("%-4s %-40s Mean=%7.2f, Range=[%7.2f, %7.2f]\n", 
+                    var, paste0("(", eti_descriptions[[var]], "):"),
+                    mean(valid_vals), min(valid_vals), max(valid_vals)))
+      }
+    }
+  }
+  cat("\n")
+  
+  cat("Growing period length:\n")
+  cat("  Mean:", sprintf("%.1f", mean(valid_weather$growing_period_days_weather, na.rm = TRUE)), "days\n")
+  cat("  Range:", sprintf("%.0f", min(valid_weather$growing_period_days_weather, na.rm = TRUE)), "-",
+      sprintf("%.0f", max(valid_weather$growing_period_days_weather, na.rm = TRUE)), "days\n\n")
+}
+```
+
+# IV. Complete Data Extraction to CSV
+
+After constructing our comprehensive spatially-enabled geopackage with all soil properties, sugarcane agronomics, rainfall, basic weather statistics, and extreme indices, we need a format suitable for statistical analysis and machine learning. This final section extracts the complete dataset into a tabular CSV format, removing the spatial geometry while retaining all analytical variables. The script carefully selects and orders variables into logical groups: target variables like yield and sugar content, soil chemical and physical properties, management practices, basic weather summaries, and all extreme weather indices. It also performs final data quality corrections, particularly fixing known issues with harvest method coding in specific years using intelligent interpolation from adjacent years. The result is a clean, analysis-ready CSV file containing over fifty variables across thousands of parcel-year observations, with clear variable names and comprehensive documentation of what each column represents. This dataset serves as the direct input for exploratory analysis, statistical modeling, and machine learning pipelines aimed at understanding and predicting sugarcane yield and quality.
+
+```{r}
+library(sf)
+library(dplyr)
+
+# ============================================================================
+# EXTRACT SUBSET AND EXPORT TO CSV (WITH ADDITIONAL VARIABLES)
+# ============================================================================
+
+# Load the geopackage
+input_gpkg <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_MERGED_soil_sugarcane_with_weather_extreme_indices.gpkg"
+output_csv <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/final_dataset_for_analysis_with_quality_metrics.csv"
+
+cat("Loading geopackage...\n")
+parcels <- st_read(input_gpkg, quiet = TRUE)
+
+# Function to extract campaign year from campaign variable
+extract_campaign_year <- function(campaign_string) {
+  if (is.na(campaign_string) || campaign_string == "") {
+    return(NA)
+  }
+  
+  campaign_clean <- trimws(as.character(campaign_string))
+  
+  if (grepl("-", campaign_clean)) {
+    year_part <- strsplit(campaign_clean, "-")[[1]][1]
+    
+    if (nchar(year_part) == 2) {
+      year_num <- as.numeric(year_part)
+      
+      if (year_num <= 30) {
+        campaign_year <- 2000 + year_num
+      } else {
+        campaign_year <- 1900 + year_num
+      }
+    } else if (nchar(year_part) == 4) {
+      campaign_year <- as.numeric(year_part)
+    } else {
+      return(NA)
+    }
+    
+    return(campaign_year)
+  }
+  
+  return(NA)
+}
+
+# Create campaign_year variable
+cat("Extracting campaign year...\n")
+parcels$campaign_year <- sapply(parcels$SC_Campaign, extract_campaign_year)
+
+cat("Valid campaign years:", sum(!is.na(parcels$campaign_year)), "out of", nrow(parcels), "\n\n")
+
+# ============================================================================
+# FIX SC_HARVEST ISSUES
+# ============================================================================
+
+cat("Fixing SC_harvest issues...\n")
+
+# First, standardize the encoding issue with "Mécanique"
+parcels$SC_harvest <- as.character(parcels$SC_harvest)
+parcels$SC_harvest[!is.na(parcels$SC_harvest) & grepl("M.*canique", parcels$SC_harvest, ignore.case = TRUE)] <- "Mécanique"
+
+# Create a lookup table for each parcel's harvest type by year
+harvest_lookup <- parcels %>%
+  st_drop_geometry() %>%
+  select(field, campaign_year, SC_harvest) %>%
+  filter(!is.na(campaign_year))
+
+# Function to get harvest value from adjacent years
+get_adjacent_harvest <- function(field_id, target_year, lookup_data) {
+  parcel_data <- lookup_data %>% filter(field == !!field_id)
+  
+  # Get values from adjacent years
+  prev_year <- parcel_data %>% filter(campaign_year == target_year - 1) %>% pull(SC_harvest)
+  next_year <- parcel_data %>% filter(campaign_year == target_year + 1) %>% pull(SC_harvest)
+  
+  # Remove NA values
+  adjacent_values <- c(prev_year, next_year)
+  adjacent_values <- adjacent_values[!is.na(adjacent_values)]
+  
+  if (length(adjacent_values) == 0) {
+    return(NA)
+  } else if (length(adjacent_values) == 1) {
+    return(adjacent_values[1])
+  } else {
+    # If both years available and they match, use that value
+    if (adjacent_values[1] == adjacent_values[2]) {
+      return(adjacent_values[1])
+    } else {
+      # If they differ, use the most recent one (next year)
+      return(adjacent_values[length(adjacent_values)])
+    }
+  }
+}
+
+# Fix 2010 (all NA)
+cat("Fixing 2010 SC_harvest values...\n")
+rows_2010 <- which(parcels$campaign_year == 2010)
+cat("Found", length(rows_2010), "rows for year 2010\n")
+
+for (i in rows_2010) {
+  new_value <- get_adjacent_harvest(parcels$field[i], 2010, harvest_lookup)
+  parcels$SC_harvest[i] <- new_value
+}
+
+# Fix 2021 (all incorrectly set to "Manuelle")
+cat("Fixing 2021 SC_harvest values...\n")
+rows_2021 <- which(parcels$campaign_year == 2021)
+cat("Found", length(rows_2021), "rows for year 2021\n")
+
+for (i in rows_2021) {
+  new_value <- get_adjacent_harvest(parcels$field[i], 2021, harvest_lookup)
+  parcels$SC_harvest[i] <- new_value
+}
+
+cat("SC_harvest correction complete!\n")
+cat("Current SC_harvest distribution:\n")
+print(table(parcels$SC_harvest, parcels$campaign_year, useNA = "ifany"))
+cat("\n")
+
+# ============================================================================
+# DEFINE VARIABLES TO KEEP (WITH ADDITIONAL QUALITY METRICS)
+# ============================================================================
+
+# Define variables to keep (in order)
+variables_to_keep <- c(
+  # Target and key variables
+  "SC_tc_per_ha_actual",
+  "SC_brix_percent",
+  "SC_variety",
+  "SC_irrigation_type",
+  "SC_crop_cycle",
+  "SC_harvest",
+  "campaign_year",
+  "pH_complete",
+  
+  # Soil chemical properties
+  "Exchangeable_Calcium_meq_100g_complete",
+  "Exchangeable_Magnesium_meq_100g_complete",
+  "Exchangeable_Potassium_meq_100g_complete",
+  
+  # Soil texture
+  "Clay_percent_complete",
+  "Fine_Silt_percent_complete",
+  "Coarse_Silt_percent_complete",
+  "Fine_Sand_percent_complete",
+  "Coarse_Sand_percent_complete",
+  
+  # Soil organic matter
+  "Total_Nitrogen_per_mille_complete",
+  "Organic_Carbon_per_mille_complete",
+  
+  # Soil ratios
+  "Mg_K_Ratio_complete",
+  "Mg_Ca_Ratio_complete",
+  
+  # Management
+  "SC_drying_duration_actual_days",
+  
+  # Rainfall
+  "growing_season_rainfall_mm",
+  
+  # Basic weather - Temperature
+  "temp_mini_mean",
+  "temp_maxi_mean",
+  "temp_moy_mean",
+  "ampl_mean",
+  
+  # Basic weather - Humidity
+  "h_mini_mean",
+  "h_maxi_mean",
+  "h_moy_mean",
+  "h_6h_mean",
+  "h_12h_mean",
+  "h_16h_mean",
+  "h_24h_mean",
+  
+  # Basic weather - Soil temperature
+  "soil_temp_6h_mean",
+  "soil_temp_16h_mean",
+  
+  # Basic weather - Radiation and evaporation
+  "radiation_total",
+  "radiation_ERA_total",
+  "evaporation_total",
+  "growing_period_days_weather",
+  
+  # Extreme Rainfall Indices (ERI)
+  "CWD",
+  "CDD",
+  "SDII",
+  "R10",
+  "R20",
+  "Rx1",
+  "Rx5",
+  "R95p",
+  "R99p",
+  
+  # Extreme Temperature Indices (ETI)
+  "HD",
+  "TNn",
+  "TNx",
+  "TXn",
+  "TXx",
+  
+  # ========================================
+  # NEW: Sugarcane Quality Metrics
+  # ========================================
+  "SC_tc_per_ha_per_week",
+  "SC_tc_per_ha_52_weeks",
+  "SC_pol_juice_percent",
+  "SC_purity_percent",
+  "SC_fiber_percent",
+  "SC_pol_cane_percent",
+  "SC_glucose_cane_percent",
+  "SC_hugot_sugar"
+)
+
+# Check which variables exist
+existing_vars <- variables_to_keep[variables_to_keep %in% names(parcels)]
+missing_vars <- variables_to_keep[!variables_to_keep %in% names(parcels)]
+
+if (length(missing_vars) > 0) {
+  cat("WARNING: Missing variables:\n")
+  print(missing_vars)
+  cat("\n")
+}
+
+cat("Total variables requested:", length(variables_to_keep), "\n")
+cat("Variables found:", length(existing_vars), "\n")
+cat("Variables missing:", length(missing_vars), "\n\n")
+
+# Create subset (remove geometry for CSV)
+cat("Creating subset with", length(existing_vars), "variables...\n")
+subset_data <- parcels %>%
+  st_drop_geometry() %>%
+  select(all_of(existing_vars))
+
+# Export to CSV
+cat("Exporting to CSV...\n")
+write.csv(subset_data, output_csv, row.names = FALSE)
+
+cat("\n=== EXPORT COMPLETE ===\n")
+cat("Output file:", output_csv, "\n")
+cat("Number of rows:", nrow(subset_data), "\n")
+cat("Number of columns:", ncol(subset_data), "\n")
+cat("File size:", round(file.size(output_csv) / 1024^2, 2), "MB\n\n")
+
+# Display first few rows
+cat("First 5 rows preview:\n")
+print(head(subset_data, 5))
+
+# Display SC_harvest summary
+cat("\n=== SC_HARVEST SUMMARY ===\n")
+cat("Distribution by harvest type:\n")
+print(table(subset_data$SC_harvest, useNA = "ifany"))
+cat("\nDistribution by year:\n")
+print(table(subset_data$campaign_year, subset_data$SC_harvest, useNA = "ifany"))
+
+# Display summary statistics for new quality metrics
+cat("\n=== NEW QUALITY METRICS SUMMARY ===\n")
+quality_vars <- c("SC_pol_juice_percent", "SC_purity_percent", "SC_fiber_percent", 
+                  "SC_pol_cane_percent", "SC_hugot_sugar", "SC_tsr")
+quality_vars_present <- quality_vars[quality_vars %in% names(subset_data)]
+
+if (length(quality_vars_present) > 0) {
+  for (var in quality_vars_present) {
+    cat("\n", var, ":\n", sep = "")
+    print(summary(subset_data[[var]]))
+  }
+} else {
+  cat("None of the quality metric variables were found in the dataset.\n")
+}
+```

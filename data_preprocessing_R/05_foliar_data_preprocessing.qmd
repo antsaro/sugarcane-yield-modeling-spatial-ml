@@ -1,0 +1,4790 @@
+---
+title: "06-08-2025"
+author: "Antsa"
+format: html
+editor: visual
+---
+
+# I. DATA ACQUISITION AND PREPARATION
+
+## I.1. Initial Data Loading
+
+Loading essential R packages (dplyr, ggplot2, corrplot, etc.) and importing the leaf dataset with proper French encoding. The dataset uses semicolons as separators and commas for decimals, requiring specific import parameters.
+
+```{r}
+# Load necessary packages
+library(pacman)
+p_load(
+  dplyr, readr, lubridate, tidyr, stringr, skimr,
+  VIM, summarytools, corrplot, janitor, purrr
+)
+
+# Set working directory
+setwd("C:/Users/U078-N800/Desktop/Ml_Internship/Copy")
+
+# Load the dataset (semicolon as separator and comma for decimal)
+leaf_data <- read.csv("BD_Leaf.csv", sep = ";", dec = ",", header = TRUE, stringsAsFactors = FALSE , fileEncoding = "latin1")
+
+
+# Display basic information about the dataset
+cat("Dataset dimensions:", dim(leaf_data), "\n")
+cat("Number of rows:", nrow(leaf_data), "\n")
+cat("Number of columns:", ncol(leaf_data), "\n")
+
+# Display column names
+cat("\nColumn names:\n")
+print(colnames(leaf_data))
+
+```
+
+## I.2. Data Types Overview
+
+```{r}
+# 2. DATA TYPES OVERVIEW
+# ===============================
+cat("2. DATA TYPES OVERVIEW\n")
+cat("======================\n")
+str(leaf_data)
+cat("\n")
+
+# Show first few rows
+cat("First 3 rows of the dataset:\n")
+print(head(leaf_data, 3))
+cat("\n")
+
+str(leaf_data)
+```
+
+## I.3. Data Type Identification and Conversion
+
+```{r}
+# ===============================
+cat("2. DATA TYPE IDENTIFICATION AND CONVERSION\n")
+cat("==========================================\n")
+
+# Define data types based on domain knowledge
+factor_variables <- c(
+  "Campagne",           # Campaign
+  "Note",              # Note
+  "Parc.",             # Parcelle
+  "Ferme",             # Farm
+  "Variete",           # Variety
+  "Cycle",             # Cycle
+  "Periode",           # Period
+  "Validation_periode", # Period validation
+  "Parcelle_de_campagne", # Campaign parcelle
+  "Validation_recolte", # Harvest validation
+  "Irr.",              # Irrigation type
+  "Mois.recolte",      # Harvest month
+  "Mois_prelevement"   # Sampling month
+)
+
+# Date variables (with their meanings)
+date_variables <- c(
+  "Impl",              # Date d'implantation (planting date)
+  "Prel.",             # Date de prélèvement des samples (sampling date)
+  "Date_analyse",      # Analysis date
+  "Date_recolte",     # Harvest date
+  "Date.commun.récolte"
+)
+
+# Numerical variables
+numerical_variables <- c(
+  "Surf",              # Surface
+  "A_ce_jour",         # To this day
+  "Tc.Ha_A.1",         # Tc/Ha A-1
+  "RH.C_A.1",          # RH%C A-1
+  "Age_prel.",         # Age at sampling
+  "H2O_feuilles",      # Leaf water content
+  "H20_gaines",        # Sheath water content
+  "N.",                # Nitrogen %
+  "X.P",               # Phosphorus %
+  "X.K",               # Potassium %
+  "Tc.Ha_A",           # Tc/Ha A
+  "RH.C_A",            # RH%C A
+  "T_canne_reelle",    # Real cane tons
+  "T_pol_canne",       # Pol tons per cane
+  "Age.en.Sem.",       # Age in weeks
+  "Age.recolte.A",     # Harvest age A
+  "Surface.A",         # Surface A
+  "Age.des.surf",      # Surface age
+  "Num_Ssemaine",      # Week number
+  "A.ce.jour"
+)
+
+# Check which variables actually exist in the dataset
+existing_factors <- intersect(factor_variables, names(leaf_data))
+existing_dates <- intersect(date_variables, names(leaf_data))
+existing_numerics <- intersect(numerical_variables, names(leaf_data))
+
+cat("FACTOR VARIABLES (", length(existing_factors), " found):\n")
+print(existing_factors)
+cat("\nDATE VARIABLES (", length(existing_dates), " found):\n")
+print(existing_dates)
+cat("\nNUMERICAL VARIABLES (", length(existing_numerics), " found):\n")
+print(existing_numerics)
+
+# Variables not classified
+all_classified <- c(existing_factors, existing_dates, existing_numerics)
+unclassified <- setdiff(names(leaf_data), all_classified)
+if(length(unclassified) > 0) {
+  cat("\nUNCLASSIFIED VARIABLES:\n")
+  print(unclassified)
+  
+  # Suggest classification for unclassified variables based on their content
+  cat("\nSUGGESTED CLASSIFICATION FOR UNCLASSIFIED VARIABLES:\n")
+  for(var in unclassified) {
+    sample_values <- head(unique(leaf_data[[var]][!is.na(leaf_data[[var]]) & leaf_data[[var]] != ""]), 5)
+    cat("Variable:", var, "| Sample values:", paste(sample_values, collapse = ", "), "\n")
+    
+    # Try to guess the type
+    non_empty <- leaf_data[[var]][!is.na(leaf_data[[var]]) & leaf_data[[var]] != ""]
+    if(length(non_empty) > 0) {
+      # Check if it looks numeric (allowing for comma as decimal separator)
+      numeric_test <- gsub(",", ".", non_empty)
+      if(all(str_detect(numeric_test, "^-?[0-9]*\\.?[0-9]+$|^$"), na.rm = TRUE)) {
+        cat("  -> Suggested: NUMERIC\n")
+      } else if(length(unique(non_empty)) < 20 && length(non_empty) > 10) {
+        cat("  -> Suggested: FACTOR\n")
+      } else {
+        cat("  -> Suggested: CHARACTER/OTHER\n")
+      }
+    }
+  }
+}
+
+# ===============================
+# 3. CONVERT DATA TYPES
+# ===============================
+cat("\n3. DATA TYPE CONVERSION\n")
+cat("=======================\n")
+
+# Create a copy for conversion
+leaf_data_converted <- leaf_data
+
+# Convert factors
+for(var in existing_factors) {
+  if(var %in% names(leaf_data_converted)) {
+    leaf_data_converted[[var]] <- as.factor(leaf_data_converted[[var]])
+    cat("Converted", var, "to factor -", nlevels(leaf_data_converted[[var]]), "levels\n")
+  }
+}
+
+# Convert dates (handle different date formats)
+for(var in existing_dates) {
+  if(var %in% names(leaf_data_converted)) {
+    # Try different date formats
+    original_values <- leaf_data_converted[[var]]
+    
+    # Check for Excel numeric dates first (like 40542)
+    if(all(str_detect(original_values[!is.na(original_values) & original_values != ""], "^[0-9]+$"), na.rm = TRUE)) {
+      # Excel date format (days since 1900-01-01, but Excel incorrectly treats 1900 as leap year)
+      leaf_data_converted[[var]] <- as.Date(as.numeric(original_values), origin = "1899-12-30")
+      cat("Converted", var, "from Excel numeric format to Date\n")
+    } else {
+      # Try different date formats
+      date_converted <- as.Date(original_values, format = "%d/%m/%Y")
+      if(all(is.na(date_converted))) {
+        date_converted <- as.Date(original_values, format = "%Y-%m-%d")
+      }
+      if(all(is.na(date_converted))) {
+        date_converted <- as.Date(original_values, format = "%m/%d/%Y")
+      }
+      
+      leaf_data_converted[[var]] <- date_converted
+      cat("Converted", var, "to Date format\n")
+    }
+    
+    # Show date range
+    valid_dates <- leaf_data_converted[[var]][!is.na(leaf_data_converted[[var]])]
+    if(length(valid_dates) > 0) {
+      date_range <- range(valid_dates)
+      cat("  Date range:", as.character(date_range[1]), "to", as.character(date_range[2]), "\n")
+    }
+  }
+}
+
+# Convert numerics (handle comma decimal separator)
+for(var in existing_numerics) {
+  if(var %in% names(leaf_data_converted)) {
+    # Replace empty strings and spaces with NA first
+    leaf_data_converted[[var]][leaf_data_converted[[var]] == "" | leaf_data_converted[[var]] == " "] <- NA
+    
+    # If it's character type, it might have comma decimals - convert them to dots
+    if(is.character(leaf_data_converted[[var]])) {
+      leaf_data_converted[[var]] <- gsub(",", ".", leaf_data_converted[[var]])
+    }
+    
+    # Store original NA count
+    original_nas <- sum(is.na(leaf_data[[var]]))
+    
+    # Convert to numeric
+    leaf_data_converted[[var]] <- as.numeric(leaf_data_converted[[var]])
+    
+    # Check conversion success
+    new_nas <- sum(is.na(leaf_data_converted[[var]]))
+    conversion_nas <- new_nas - original_nas
+    
+    if(conversion_nas > 0) {
+      cat("WARNING:", conversion_nas, "values became NA during conversion of", var, "\n")
+      # Show some examples of problematic values
+      original_values <- leaf_data[[var]]
+      problematic <- original_values[is.na(leaf_data_converted[[var]]) & !is.na(original_values)]
+      if(length(problematic) > 0) {
+        cat("  Examples of unconverted values:", paste(head(problematic, 3), collapse = ", "), "\n")
+      }
+    } else {
+      cat("Successfully converted", var, "to numeric\n")
+    }
+  }
+}
+
+
+str(leaf_data_converted)
+```
+
+## I.4. Campaign Analysis
+
+```{r}
+# ===============================
+# 3. CAMPAIGN ANALYSIS
+# ===============================
+
+leaf_data_converted <- leaf_data_converted %>%
+  mutate(Campagne = as.character(Campagne))
+cat("3. CAMPAIGN ANALYSIS\n")
+cat("====================\n")
+campaign_summary <- leaf_data_converted %>%
+  group_by(Campagne) %>%
+  summarise(
+    n_observations = n(),
+    n_parcelles = n_distinct(Parc.),
+    n_fermes = n_distinct(Ferme),
+    .groups = 'drop'
+  ) %>%
+  arrange(Campagne)
+
+print("Observations per Campaign:")
+print(campaign_summary)
+cat("\nCampaign period coverage:")
+cat("From", min(leaf_data_converted$Campagne, na.rm = TRUE), "to", max(leaf_data_converted$Campagne, na.rm = TRUE), "\n")
+cat("Total campaigns:", n_distinct(leaf_data_converted$Campagne, na.rm = TRUE), "\n\n")
+
+# ===============================
+# 4. FARM AND PARCELLE STRUCTURE ANALYSIS
+# ===============================
+cat("4. FARM AND PARCELLE STRUCTURE ANALYSIS\n")
+cat("========================================\n")
+
+# Parcelles per farm
+parcelle_per_farm <- leaf_data_converted %>%
+  group_by(Ferme) %>%
+  summarise(
+    n_parcelles = n_distinct(Parc.),
+    campaigns = paste(sort(unique(Campagne)), collapse = ", "),
+    varieties = n_distinct(Variete, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_parcelles))
+
+print("Parcelles per Farm:")
+print(parcelle_per_farm)
+
+# Farm consistency across campaigns
+farm_campaign <- leaf_data_converted %>%
+  group_by(Campagne) %>%
+  summarise(
+    farms = list(sort(unique(Ferme))),
+    n_farms = n_distinct(Ferme),
+    .groups = 'drop'
+  )
+
+print("\nFarms per Campaign:")
+print(farm_campaign %>% select(-farms))
+
+# Check unique farms
+all_farms <- unique(leaf_data_converted$Ferme)
+cat("\nTotal unique farms across all campaigns:", length(all_farms), "\n")
+print("Unique farms:")
+print(all_farms)
+```
+
+## I.5. Farm and Parcels structure analysis
+
+```{r}
+# ===============================
+# 4. FARM AND PARCELLE STRUCTURE ANALYSIS
+# ===============================
+cat("4. FARM AND PARCELLE STRUCTURE ANALYSIS\n")
+cat("========================================\n")
+
+# Parcelles per farm
+parcelle_per_farm <- leaf_data_converted %>%
+  group_by(Ferme) %>%
+  summarise(
+    n_parcelles = n_distinct(Parc.),
+    campaigns = paste(sort(as.character(unique(Campagne))), collapse = ", "),
+    varieties = n_distinct(Variete, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_parcelles))
+
+print("Parcelles per Farm:")
+print(parcelle_per_farm)
+
+# Farm consistency across campaigns
+farm_campaign <- leaf_data_converted %>%
+  group_by(Campagne) %>%
+  summarise(
+    farms = list(sort(unique(Ferme))),
+    n_farms = n_distinct(Ferme),
+    .groups = 'drop'
+  )
+
+print("\nFarms per Campaign:")
+print(farm_campaign %>% select(-farms))
+
+# Check unique farms
+all_farms <- unique(leaf_data_converted$Ferme)
+cat("\nTotal unique farms across all campaigns:", length(all_farms), "\n")
+print("Unique farms:")
+print(all_farms)
+
+# ===============================
+# 5. PARCELLE NAMING PATTERN ANALYSIS
+# ===============================
+cat("\n5. PARCELLE NAMING PATTERN ANALYSIS\n")
+cat("===================================\n")
+
+# Extract parcelle patterns
+parcelle_pattern <- leaf_data_converted %>%
+  mutate(
+    parcelle_prefix = str_extract(Parc., "^[A-Z]+"),
+    parcelle_number = str_extract(Parc., "[0-9]+[A-Z]*$")
+  ) %>%
+  group_by(parcelle_prefix) %>%
+  summarise(
+    count = n(),
+    unique_parcelles = n_distinct(Parc.),
+    farms = paste(sort(unique(Ferme)), collapse = ", "),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(count))
+
+print("Parcelle naming patterns:")
+print(parcelle_pattern)
+
+# Evolution of parcelles over time
+parcelle_evolution <- leaf_data_converted %>%
+  group_by(Campagne) %>%
+  summarise(
+    parcelles = list(sort(unique(Parc.))),
+    n_parcelles = n_distinct(Parc.),
+    .groups = 'drop'
+  ) %>%
+  arrange(Campagne)
+
+print("\nParcelle count evolution over campaigns:")
+print(parcelle_evolution %>% select(-parcelles))
+
+# ===============================
+# 6. VARIETY ANALYSIS
+# ===============================
+cat("\n6. VARIETY ANALYSIS\n")
+cat("===================\n")
+
+variety_summary <- leaf_data_converted %>%
+  group_by(Variete) %>%
+  summarise(
+    n_observations = n(),
+    n_parcelles = n_distinct(Parc.),
+    n_farms = n_distinct(Ferme),
+    campaigns = paste(sort(as.character(unique(Campagne))), collapse = ", "),
+    avg_surface = mean(Surf, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_observations))
+
+print("Variety distribution:")
+print(variety_summary)
+```
+
+## I.6. Missing Data Analysis
+
+```{r}
+#4. DETAILED MISSING DATA ANALYSIS
+# ===============================
+cat("\n4. DETAILED MISSING DATA ANALYSIS\n")
+cat("==================================\n")
+
+# Overall missing data summary
+missing_summary <- leaf_data_converted %>%
+  summarise_all(~sum(is.na(.))) %>%
+  gather(key = "variable", value = "missing_count") %>%
+  mutate(
+    missing_percentage = round((missing_count / nrow(leaf_data_converted)) * 100, 2),
+    variable_type = case_when(
+      variable %in% existing_factors ~ "Factor",
+      variable %in% existing_dates ~ "Date", 
+      variable %in% existing_numerics ~ "Numeric",
+      TRUE ~ "Unclassified"
+    )
+  ) %>%
+  arrange(desc(missing_count))
+
+print("COMPLETE MISSING DATA SUMMARY:")
+print(missing_summary)
+
+# Missing data by variable type
+cat("\nMISSING DATA BY VARIABLE TYPE:\n")
+missing_by_type <- missing_summary %>%
+  group_by(variable_type) %>%
+  summarise(
+    n_variables = n(),
+    total_missing = sum(missing_count),
+    avg_missing_pct = round(mean(missing_percentage), 2),
+    max_missing_pct = max(missing_percentage),
+    .groups = 'drop'
+  )
+print(missing_by_type)
+
+# Variables with high missing rates (>50%)
+high_missing <- missing_summary %>%
+  filter(missing_percentage > 50) %>%
+  arrange(desc(missing_percentage))
+
+if(nrow(high_missing) > 0) {
+  cat("\nVARIABLES WITH HIGH MISSING RATES (>50%):\n")
+  print(high_missing)
+} else {
+  cat("\nNo variables with >50% missing values found.\n")
+}
+
+# ===============================
+# 5. FACTOR VARIABLES ANALYSIS
+# ===============================
+cat("\n5. FACTOR VARIABLES ANALYSIS\n")
+cat("============================\n")
+
+for(var in existing_factors) {
+  if(var %in% names(leaf_data_converted)) {
+    cat("\n--- FACTOR:", var, "---\n")
+    var_summary <- leaf_data_converted %>%
+      count(.data[[var]], name = "count") %>%
+      mutate(percentage = round(count/sum(count)*100, 2)) %>%
+      arrange(desc(count))
+    
+    cat("Levels:", nlevels(leaf_data_converted[[var]]), "\n")
+    cat("Missing values:", sum(is.na(leaf_data_converted[[var]])), "\n")
+    print("Distribution (top 10):")
+    print(head(var_summary, 10))
+  }
+}
+
+# ===============================
+# 6. NUMERICAL VARIABLES ANALYSIS
+# ===============================
+cat("\n6. NUMERICAL VARIABLES ANALYSIS\n")
+cat("===============================\n")
+
+if(length(existing_numerics) > 0) {
+  # Comprehensive numeric summary
+  numeric_data <- leaf_data_converted %>% select(all_of(existing_numerics))
+  
+  cat("SUMMARY STATISTICS FOR ALL NUMERICAL VARIABLES:\n")
+  print(summary(numeric_data))
+  
+  # Detailed analysis for each numeric variable
+  cat("\nDETAILED NUMERICAL ANALYSIS:\n")
+  for(var in existing_numerics) {
+    if(var %in% names(leaf_data_converted)) {
+      cat("\n--- NUMERIC VARIABLE:", var, "---\n")
+      
+      var_data <- leaf_data_converted[[var]]
+      non_na_data <- var_data[!is.na(var_data)]
+      
+      if(length(non_na_data) > 0) {
+        cat("Missing values:", sum(is.na(var_data)), "(", 
+            round(sum(is.na(var_data))/length(var_data)*100, 2), "%)\n")
+        cat("Non-missing values:", length(non_na_data), "\n")
+        cat("Min:", min(non_na_data), "\n")
+        cat("Q1:", quantile(non_na_data, 0.25), "\n")
+        cat("Median:", median(non_na_data), "\n")
+        cat("Mean:", round(mean(non_na_data), 3), "\n")
+        cat("Q3:", quantile(non_na_data, 0.75), "\n")
+        cat("Max:", max(non_na_data), "\n")
+        cat("Std Dev:", round(sd(non_na_data), 3), "\n")
+        
+        # Check for outliers (values beyond 1.5 * IQR)
+        Q1 <- quantile(non_na_data, 0.25)
+        Q3 <- quantile(non_na_data, 0.75)
+        IQR <- Q3 - Q1
+        outliers <- non_na_data[non_na_data < (Q1 - 1.5*IQR) | non_na_data > (Q3 + 1.5*IQR)]
+        cat("Potential outliers:", length(outliers), "\n")
+        if(length(outliers) > 0 && length(outliers) <= 10) {
+          cat("Outlier values:", paste(round(outliers, 3), collapse = ", "), "\n")
+        }
+        
+        # Zero values
+        zero_count <- sum(non_na_data == 0)
+        if(zero_count > 0) {
+          cat("Zero values:", zero_count, "(", round(zero_count/length(non_na_data)*100, 2), "%)\n")
+        }
+        
+        # Negative values
+        neg_count <- sum(non_na_data < 0)
+        if(neg_count > 0) {
+          cat("Negative values:", neg_count, "(", round(neg_count/length(non_na_data)*100, 2), "%)\n")
+        }
+      } else {
+        cat("No non-missing values found for", var, "\n")
+      }
+    }
+  }
+}
+```
+
+## I.7. Date variables analysis
+
+```{r}
+# ===============================
+# 7. DATE VARIABLES ANALYSIS
+# ===============================
+cat("\n7. DATE VARIABLES ANALYSIS\n")
+cat("==========================\n")
+
+for(var in existing_dates) {
+  if(var %in% names(leaf_data_converted)) {
+    cat("\n--- DATE VARIABLE:", var, "---\n")
+    
+    date_data <- leaf_data_converted[[var]]
+    non_na_dates <- date_data[!is.na(date_data)]
+    
+    if(length(non_na_dates) > 0) {
+      cat("Missing values:", sum(is.na(date_data)), "(", 
+          round(sum(is.na(date_data))/length(date_data)*100, 2), "%)\n")
+      cat("Date range:", as.character(min(non_na_dates)), "to", as.character(max(non_na_dates)), "\n")
+      cat("Time span:", as.numeric(max(non_na_dates) - min(non_na_dates)), "days\n")
+      
+      # Year distribution
+      years <- year(non_na_dates)
+      year_dist <- table(years)
+      cat("Year distribution:\n")
+      print(year_dist)
+      
+      # Month distribution
+      months <- month(non_na_dates)
+      month_dist <- table(months)
+      cat("Month distribution:\n")
+      print(month_dist)
+    } else {
+      cat("No valid dates found for", var, "\n")
+    }
+  }
+}
+
+# ===============================
+# 8. CAMPAIGN ANALYSIS
+# ===============================
+cat("\n8. CAMPAIGN ANALYSIS\n")
+cat("====================\n")
+
+if("Campagne" %in% names(leaf_data_converted)) {
+  campaign_analysis <- leaf_data_converted %>%
+    group_by(Campagne) %>%
+    summarise(
+      n_observations = n(),
+      n_parcelles = n_distinct(Parc., na.rm = TRUE),
+      n_fermes = n_distinct(Ferme, na.rm = TRUE),
+      n_varieties = n_distinct(Variete, na.rm = TRUE),
+      avg_surface = round(mean(Surf, na.rm = TRUE), 2),
+      total_surface = round(sum(Surf, na.rm = TRUE), 2),
+      .groups = 'drop'
+    )
+  
+  print("CAMPAIGN SUMMARY:")
+  print(campaign_analysis)
+}
+
+# ===============================
+# 9. VARIETY AND FARM ANALYSIS
+# ===============================
+cat("\n9. VARIETY AND FARM ANALYSIS\n")
+cat("============================\n")
+
+if("Variete" %in% names(leaf_data_converted)) {
+  variety_analysis <- leaf_data_converted %>%
+    group_by(Variete) %>%
+    summarise(
+      n_observations = n(),
+      n_campaigns = n_distinct(Campagne, na.rm = TRUE),
+      n_farms = n_distinct(Ferme, na.rm = TRUE),
+      avg_yield = round(mean(Tc.Ha_A, na.rm = TRUE), 2),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(n_observations))
+  
+  print("VARIETY ANALYSIS:")
+  print(variety_analysis)
+}
+
+# ===============================
+# 10. DATA QUALITY ASSESSMENT
+# ===============================
+cat("\n10. DATA QUALITY ASSESSMENT\n")
+cat("============================\n")
+
+# Completeness by row
+row_completeness <- leaf_data_converted %>%
+  mutate(row_id = row_number()) %>%
+  rowwise() %>%
+  mutate(
+    missing_count = sum(is.na(c_across(-row_id))),
+    completeness_pct = round((ncol(leaf_data_converted)-1-missing_count)/(ncol(leaf_data_converted)-1)*100, 2)
+  ) %>%
+  ungroup() %>%
+  select(row_id, missing_count, completeness_pct)
+
+cat("ROW COMPLETENESS SUMMARY:\n")
+cat("Average completeness per row:", round(mean(row_completeness$completeness_pct), 2), "%\n")
+cat("Rows with 100% completeness:", sum(row_completeness$completeness_pct == 100), "\n")
+cat("Rows with <50% completeness:", sum(row_completeness$completeness_pct < 50), "\n")
+
+# Most incomplete rows
+cat("\nMOST INCOMPLETE ROWS (top 5):\n")
+print(head(row_completeness %>% arrange(completeness_pct), 5))
+
+# Most complete rows
+cat("\nMOST COMPLETE ROWS (top 5):\n")
+print(head(row_completeness %>% arrange(desc(completeness_pct)), 5))
+
+```
+
+# II. Dataset Integration (Three-Dataset Parcel-Year LinkageThree-Dataset Parcel-Year Linkage)
+
+Creating normalized parcel-year keys by converting parcel names to uppercase and extracting campaign years (e.g., "2011-2012" → 2011 for leaf data, "03-04" → 2003 for yield data). Performing three-way joins to identify: (1) complete matches present in all datasets, (2) two-way overlaps (yield+soil, yield+leaf, soil+leaf), and (3) unique records per dataset.
+
+```{r}
+head(leaf_data_converted) 
+# Unique and sorted
+unique_parc. <- sort(unique(leaf_data_converted$Parc.))
+unique_parcelle <- sort(unique(data$Parcelle))
+unique_parc_detaillee <- sort(unique(soil_data$Parc.Detaillee))
+
+# Display with numbering
+cat("📌 Unique Parc. values:\n")
+for (i in seq_along(unique_parc.)) {
+  cat(paste0(i, ". ", unique_parc.[i], "\n"))
+}
+
+cat("\n📌 Unique Parcelle values:\n")
+for (i in seq_along(unique_parcelle)) {
+  cat(paste0(i, ". ", unique_parcelle[i], "\n"))
+}
+
+cat("📌 Unique Parc.Detaillee values:\n")
+for (i in seq_along(unique_parc_detaillee)) {
+  cat(paste0(i, ". ", unique_parc_detaillee[i], "\n"))
+}
+```
+
+## II.1. Data Integration (All Uppercase)
+
+```{r}
+# Step 1: Convert to uppercase
+soil_data$Parc.Detaillee <- toupper(soil_data$Parc.Detaillee)
+data$Parcelle <- toupper(data$Parcelle)
+leaf_data_converted$Parc. <- toupper(leaf_data_converted$Parc.)
+
+# Step 2: Get unique sorted values
+unique_parc_detaillee <- sort(unique(soil_data$Parc.Detaillee))
+unique_parcelle <- sort(unique(data$Parcelle))
+unique_parc <- sort(unique(leaf_data_converted$Parc.))
+
+# Step 3: Display with count and numbered list
+cat("📌 Unique values in soil_data$Parc.Detaillee:\n")
+cat(paste0("Total: ", length(unique_parc_detaillee), " unique entries\n\n"))
+for (i in seq_along(unique_parc_detaillee)) {
+  cat(paste0(i, ". ", unique_parc_detaillee[i], "\n"))
+}
+
+cat("\n📌 Unique values in data$Parcelle:\n")
+cat(paste0("Total: ", length(unique_parcelle), " unique entries\n\n"))
+for (i in seq_along(unique_parcelle)) {
+  cat(paste0(i, ". ", unique_parcelle[i], "\n"))
+}
+
+cat("\n📌 Unique values in leaf_data_converted$Parc.:\n")
+cat(paste0("Total: ", length(unique_parc), " unique entries\n\n"))
+for (i in seq_along(unique_parc)) {
+  cat(paste0(i, ". ", unique_parc[i], "\n"))
+}
+
+```
+
+```{r}
+# Step 1: Convert to uppercase
+soil_data$Parc.Detaillee <- toupper(soil_data$Parc.Detaillee)
+data$Parcelle <- toupper(data$Parcelle)
+leaf_data_converted$Parc. <- toupper(leaf_data_converted$Parc.)
+
+# Step 2: Count frequencies
+soil_freq <- sort(table(soil_data$Parc.Detaillee), decreasing = TRUE)
+data_freq <- sort(table(data$Parcelle), decreasing = TRUE)
+leaf_freq <- sort(table(leaf_data_converted$Parc.), decreasing = TRUE)
+
+# Step 3: Display the frequencies nicely
+cat("📊 Frequency of each unique 'Parc.Detaillee' in soil_data:\n")
+cat(paste0("Total unique values: ", length(soil_freq), "\n\n"))
+for (i in seq_along(soil_freq)) {
+  cat(paste0(i, ". ", names(soil_freq)[i], " – ", soil_freq[i], " sample(s)\n"))
+}
+
+cat("\n📊 Frequency of each unique 'Parcelle' in data:\n")
+cat(paste0("Total unique values: ", length(data_freq), "\n\n"))
+for (i in seq_along(data_freq)) {
+  cat(paste0(i, ". ", names(data_freq)[i], " – ", data_freq[i], " sample(s)\n"))
+}
+
+cat("\n📊 Frequency of each unique 'Parc.' in leaf_data_converted:\n")
+cat(paste0("Total unique values: ", length(leaf_freq), "\n\n"))
+for (i in seq_along(leaf_freq)) {
+  cat(paste0(i, ". ", names(leaf_freq)[i], " – ", leaf_freq[i], " sample(s)\n"))
+}
+
+# Step 4: Standardize inputs to uppercase for matching
+soil_parcels <- toupper(unique(soil_data$Parc.Detaillee))
+yield_parcels <- toupper(unique(data$Parcelle))
+leaf_parcels <- toupper(unique(leaf_data_converted$Parc.))
+
+# Step 5: Matching statistics
+common_all_three <- Reduce(intersect, list(soil_parcels, yield_parcels, leaf_parcels))
+common_soil_yield <- intersect(soil_parcels, yield_parcels)
+common_soil_leaf <- intersect(soil_parcels, leaf_parcels)
+common_yield_leaf <- intersect(yield_parcels, leaf_parcels)
+
+only_soil <- setdiff(soil_parcels, union(yield_parcels, leaf_parcels))
+only_yield <- setdiff(yield_parcels, union(soil_parcels, leaf_parcels))
+only_leaf <- setdiff(leaf_parcels, union(soil_parcels, yield_parcels))
+
+# Step 6: Display results
+cat("\n🔍 Parcel Matching Summary:\n")
+cat("• Total unique parcels in SOIL data  :", length(soil_parcels), "\n")
+cat("• Total unique parcels in YIELD data :", length(yield_parcels), "\n")
+cat("• Total unique parcels in LEAF data  :", length(leaf_parcels), "\n")
+cat("• ✅ Common to ALL THREE datasets    :", length(common_all_three), "\n")
+cat("• ✅ Common to SOIL & YIELD only     :", length(common_soil_yield), "\n")
+cat("• ✅ Common to SOIL & LEAF only      :", length(common_soil_leaf), "\n")
+cat("• ✅ Common to YIELD & LEAF only     :", length(common_yield_leaf), "\n")
+cat("• ❌ Parcels only in SOIL data       :", length(only_soil), "\n")
+cat("• ❌ Parcels only in YIELD data      :", length(only_yield), "\n")
+cat("• ❌ Parcels only in LEAF data       :", length(only_leaf), "\n")
+
+# Step 7: Display samples of mismatches
+cat("\n📂 Sample of parcels only in SOIL data:\n")
+if (length(only_soil) > 0) {
+  print(head(only_soil, 10))
+} else {
+  cat("✔️ None. All soil parcels are found in other datasets.\n")
+}
+
+cat("\n📂 Sample of parcels only in YIELD data:\n")
+if (length(only_yield) > 0) {
+  print(head(only_yield, 10))
+} else {
+  cat("✔️ None. All yield parcels are found in other datasets.\n")
+}
+
+cat("\n📂 Sample of parcels only in LEAF data:\n")
+if (length(only_leaf) > 0) {
+  print(head(only_leaf, 10))
+} else {
+  cat("✔️ None. All leaf parcels are found in other datasets.\n")
+}
+
+cat("\n📂 Parcels common to ALL THREE datasets:\n")
+if (length(common_all_three) > 0) {
+  print(head(common_all_three, 10))
+} else {
+  cat("❌ No parcels are common to all three datasets.\n")
+}
+
+View(leaf_data_converted)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# === YIELD DATA ===
+cat("Yield data dimensions:", dim(data), "\n")
+cat("Yield data columns:\n")
+print(colnames(data))
+
+# Extract start year from Camp, e.g. "03-04" -> 2003
+data <- data %>%
+  mutate(year_start = 2000 + as.numeric(substr(Camp, 1, 2)))
+
+# Normalize parcel names: uppercase only, keep spaces
+data <- data %>%
+  mutate(Parcelle_norm = str_to_upper(Parcelle))
+
+# === SOIL DATA ===
+cat("\nSoil data dimensions:", dim(soil_data), "\n")
+cat("Soil data columns:\n")
+print(colnames(soil_data))
+
+# Normalize parcel names in soil data: uppercase only, keep spaces + ensure Annee is numeric
+soil_data <- soil_data %>%
+  mutate(
+    Parc.Detaillee_norm = str_to_upper(Parc.Detaillee),
+    Annee = as.numeric(Annee)
+  )
+
+# === LEAF DATA ===
+cat("\nLeaf data dimensions:", dim(leaf_data_converted), "\n")
+cat("Leaf data columns:\n")
+print(colnames(leaf_data_converted))
+
+# Extract start year from Campagne, e.g. "2011-2012" -> 2011
+leaf_data_converted <- leaf_data_converted %>%
+  mutate(
+    year_start = as.numeric(str_extract(Campagne, "^\\d{4}")),
+    Parc_norm = str_to_upper(Parc.)
+  )
+
+# Check the campaign conversion
+cat("\nSample of leaf campaign conversion:\n")
+leaf_sample <- leaf_data_converted %>%
+  select(Campagne, year_start) %>%
+  distinct() %>%
+  head(10)
+print(leaf_sample)
+
+# --- Create unique parcel-year keys ---
+yield_keys <- data %>%
+  distinct(Parcelle_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parcelle_norm)
+
+soil_keys <- soil_data %>%
+  distinct(Parc.Detaillee_norm, Annee) %>%
+  rename(Year = Annee, Parcel = Parc.Detaillee_norm)
+
+leaf_keys <- leaf_data_converted %>%
+  distinct(Parc_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parc_norm)
+
+# --- Find common and unique keys ---
+# Three-way comparisons
+common_all_three <- yield_keys %>%
+  inner_join(soil_keys, by = c("Parcel", "Year")) %>%
+  inner_join(leaf_keys, by = c("Parcel", "Year"))
+
+# Pairwise comparisons
+common_yield_soil <- inner_join(yield_keys, soil_keys, by = c("Parcel", "Year"))
+common_yield_leaf <- inner_join(yield_keys, leaf_keys, by = c("Parcel", "Year"))
+common_soil_leaf <- inner_join(soil_keys, leaf_keys, by = c("Parcel", "Year"))
+
+# Unique to each dataset
+only_in_yield <- yield_keys %>%
+  anti_join(soil_keys, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys, by = c("Parcel", "Year"))
+
+only_in_soil <- soil_keys %>%
+  anti_join(yield_keys, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys, by = c("Parcel", "Year"))
+
+only_in_leaf <- leaf_keys %>%
+  anti_join(yield_keys, by = c("Parcel", "Year")) %>%
+  anti_join(soil_keys, by = c("Parcel", "Year"))
+
+# --- Summary output ---
+cat("\n=== Three-Dataset Parcel-Year Linkage Summary ===\n")
+cat("Total unique parcel-year in yield data: ", nrow(yield_keys), "\n")
+cat("Total unique parcel-year in soil data : ", nrow(soil_keys), "\n")
+cat("Total unique parcel-year in leaf data : ", nrow(leaf_keys), "\n")
+cat("Common to ALL THREE datasets          : ", nrow(common_all_three), "\n")
+cat("Common to YIELD & SOIL only           : ", nrow(common_yield_soil), "\n")
+cat("Common to YIELD & LEAF only           : ", nrow(common_yield_leaf), "\n")
+cat("Common to SOIL & LEAF only            : ", nrow(common_soil_leaf), "\n")
+cat("Parcel-years only in yield data       : ", nrow(only_in_yield), "\n")
+cat("Parcel-years only in soil data        : ", nrow(only_in_soil), "\n")
+cat("Parcel-years only in leaf data        : ", nrow(only_in_leaf), "\n")
+
+# --- Show samples ---
+cat("\nSample parcel-years common to ALL THREE datasets:\n")
+print(head(common_all_three, 10))
+
+cat("\nSample parcel-years only in yield data:\n")
+print(head(only_in_yield, 10))
+
+cat("\nSample parcel-years only in soil data:\n")
+print(head(only_in_soil, 10))
+
+cat("\nSample parcel-years only in leaf data:\n")
+print(head(only_in_leaf, 10))
+```
+
+## II.2. Data Integration (Trimmed and All uppercase)
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# === YIELD DATA ===
+cat("Yield data dimensions:", dim(data), "\n")
+cat("Yield data columns:\n")
+print(colnames(data))
+
+# Extract start year from Camp, e.g. "03-04" -> 2003
+data <- data %>%
+  mutate(year_start = 2000 + as.numeric(substr(Camp, 1, 2)))
+
+# Normalize parcel names: uppercase and trim all spaces
+data <- data %>%
+  mutate(Parcelle_norm = str_to_upper(str_replace_all(Parcelle, "\\s+", "")))
+
+# === SOIL DATA ===
+cat("\nSoil data dimensions:", dim(soil_data), "\n")
+cat("Soil data columns:\n")
+print(colnames(soil_data))
+
+# Normalize parcel names in soil data: uppercase only, keep spaces + ensure Annee is numeric
+soil_data <- soil_data %>%
+  mutate(
+    Parc.Detaillee_norm = str_to_upper(Parc.Detaillee),
+    Annee = as.numeric(Annee)
+  )
+
+# === LEAF DATA ===
+cat("\nLeaf data dimensions:", dim(leaf_data_converted), "\n")
+cat("Leaf data columns:\n")
+print(colnames(leaf_data_converted))
+
+# Extract start year from Campagne, e.g. "2011-2012" -> 2011
+leaf_data_converted <- leaf_data_converted %>%
+  mutate(
+    year_start = as.numeric(str_extract(Campagne, "^\\d{4}")),
+    Parc_norm = str_to_upper(Parc.)
+  )
+
+# Check the campaign conversion
+cat("\nSample of leaf campaign conversion:\n")
+leaf_sample <- leaf_data_converted %>%
+  select(Campagne, year_start) %>%
+  distinct() %>%
+  head(10)
+print(leaf_sample)
+
+# --- Create unique parcel-year keys ---
+yield_keys <- data %>%
+  distinct(Parcelle_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parcelle_norm)
+
+soil_keys <- soil_data %>%
+  distinct(Parc.Detaillee_norm, Annee) %>%
+  rename(Year = Annee, Parcel = Parc.Detaillee_norm)
+
+leaf_keys <- leaf_data_converted %>%
+  distinct(Parc_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parc_norm)
+
+# --- Find common and unique keys ---
+# Three-way comparisons
+common_all_three <- yield_keys %>%
+  inner_join(soil_keys, by = c("Parcel", "Year")) %>%
+  inner_join(leaf_keys, by = c("Parcel", "Year"))
+
+# Pairwise comparisons
+common_yield_soil <- inner_join(yield_keys, soil_keys, by = c("Parcel", "Year"))
+common_yield_leaf <- inner_join(yield_keys, leaf_keys, by = c("Parcel", "Year"))
+common_soil_leaf <- inner_join(soil_keys, leaf_keys, by = c("Parcel", "Year"))
+
+# Unique to each dataset
+only_in_yield <- yield_keys %>%
+  anti_join(soil_keys, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys, by = c("Parcel", "Year"))
+
+only_in_soil <- soil_keys %>%
+  anti_join(yield_keys, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys, by = c("Parcel", "Year"))
+
+only_in_leaf <- leaf_keys %>%
+  anti_join(yield_keys, by = c("Parcel", "Year")) %>%
+  anti_join(soil_keys, by = c("Parcel", "Year"))
+
+# --- Summary output ---
+cat("\n=== Three-Dataset Parcel-Year Linkage Summary ===\n")
+cat("Total unique parcel-year in yield data: ", nrow(yield_keys), "\n")
+cat("Total unique parcel-year in soil data : ", nrow(soil_keys), "\n")
+cat("Total unique parcel-year in leaf data : ", nrow(leaf_keys), "\n")
+cat("Common to ALL THREE datasets          : ", nrow(common_all_three), "\n")
+cat("Common to YIELD & SOIL only           : ", nrow(common_yield_soil), "\n")
+cat("Common to YIELD & LEAF only           : ", nrow(common_yield_leaf), "\n")
+cat("Common to SOIL & LEAF only            : ", nrow(common_soil_leaf), "\n")
+cat("Parcel-years only in yield data       : ", nrow(only_in_yield), "\n")
+cat("Parcel-years only in soil data        : ", nrow(only_in_soil), "\n")
+cat("Parcel-years only in leaf data        : ", nrow(only_in_leaf), "\n")
+
+# --- Show samples ---
+cat("\nSample parcel-years common to ALL THREE datasets:\n")
+print(head(common_all_three, 10))
+
+cat("\nSample parcel-years only in yield data:\n")
+print(head(only_in_yield, 10))
+
+cat("\nSample parcel-years only in soil data:\n")
+print(head(only_in_soil, 10))
+
+cat("\nSample parcel-years only in leaf data:\n")
+print(head(only_in_leaf, 10))
+```
+
+## II.3. Not trimmed (space preserved)
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(dplyr)
+
+# === VERSION 1: TWO-WAY PLOTS (Uppercase, Spaces Preserved) ===
+
+# First, create normalized versions with uppercase but spaces preserved
+data_twoway <- data %>%
+  mutate(Parcelle_norm = str_to_upper(Parcelle))
+
+soil_data_twoway <- soil_data %>%
+  mutate(
+    Parc.Detaillee_norm = str_to_upper(Parc.Detaillee),
+    Annee = as.numeric(Annee)
+  )
+
+# Create keys for two-way analysis
+yield_keys_twoway <- data_twoway %>%
+  distinct(Parcelle_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parcelle_norm)
+
+soil_keys_twoway <- soil_data_twoway %>%
+  distinct(Parc.Detaillee_norm, Annee) %>%
+  rename(Year = Annee, Parcel = Parc.Detaillee_norm)
+
+# Two-way matching
+common_keys_twoway <- inner_join(yield_keys_twoway, soil_keys_twoway, by = c("Parcel", "Year"))
+only_in_yield_twoway <- anti_join(yield_keys_twoway, soil_keys_twoway, by = c("Parcel", "Year"))
+only_in_soil_twoway <- anti_join(soil_keys_twoway, yield_keys_twoway, by = c("Parcel", "Year"))
+
+# Prepare data for two-way plotting
+linkage_counts_twoway <- tibble(
+  Category = c("Yield Only", "Soil Only", "Common"),
+  Count = c(nrow(only_in_yield_twoway), nrow(only_in_soil_twoway), nrow(common_keys_twoway))
+)
+
+# ---- 1. Bar plot: Two-way Parcel-Year linkage summary ----
+plot_linkage_twoway <- ggplot(linkage_counts_twoway, aes(x = Category, y = Count, fill = Category)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = scales::comma(Count)), vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("Yield Only" = "#1f78b4", "Soil Only" = "#33a02c", "Common" = "#6a3d9a")) +
+  labs(title = "Two-Way Parcel-Year Linkage Summary",
+       subtitle = paste0("Yield unique: ", scales::comma(nrow(yield_keys_twoway)),
+                         " | Soil unique: ", scales::comma(nrow(soil_keys_twoway))),
+       x = NULL,
+       y = "Number of Unique Parcel-Year Pairs") +
+  theme_minimal(base_size = 15) +
+  theme(axis.text.x = element_text(face = "bold"))
+
+# ---- 2. Two-way Year distribution plots ----
+yield_year_dist_twoway <- yield_keys_twoway %>%
+  group_by(Year) %>%
+  summarise(Parcel_Count = n()) %>%
+  ungroup()
+
+plot_yield_year_twoway <- ggplot(yield_year_dist_twoway, aes(x = Year, y = Parcel_Count)) +
+  geom_col(fill = "#1f78b4") +
+  scale_x_continuous(breaks = pretty(yield_year_dist_twoway$Year, 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Yield Data: Parcel-Year Counts by Year",
+       x = "Year",
+       y = "Number of Unique Parcels") +
+  theme_minimal(base_size = 13)
+
+soil_year_dist_twoway <- soil_keys_twoway %>%
+  group_by(Year) %>%
+  summarise(Parcel_Count = n()) %>%
+  ungroup()
+
+plot_soil_year_twoway <- ggplot(soil_year_dist_twoway, aes(x = Year, y = Parcel_Count)) +
+  geom_col(fill = "#33a02c") +
+  scale_x_continuous(breaks = pretty(soil_year_dist_twoway$Year, 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Soil Data: Parcel-Year Counts by Year",
+       x = "Year",
+       y = "Number of Unique Parcels") +
+  theme_minimal(base_size = 13)
+
+# ---- 3. Two-way Pie chart ----
+plot_pie_twoway <- ggplot(linkage_counts_twoway, aes(x = "", y = Count, fill = Category)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar("y") +
+  scale_fill_manual(values = c("Yield Only" = "#1f78b4", "Soil Only" = "#33a02c", "Common" = "#6a3d9a")) +
+  geom_text(aes(label = paste0(Category, "\n", scales::percent(Count / sum(Count), accuracy = 0.1))),
+            position = position_stack(vjust = 0.5), size = 4) +
+  labs(title = "Two-Way Linkage Proportions") +
+  theme_void() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+# === VERSION 2: THREE-WAY PLOTS (Uppercase, Spaces Preserved) ===
+
+# Create normalized leaf data with spaces preserved
+leaf_data_twoway <- leaf_data_converted %>%
+  mutate(
+    year_start = as.numeric(str_extract(Campagne, "^\\d{4}")),
+    Parc_norm = str_to_upper(Parc.)
+  )
+
+# Create keys for three-way analysis
+leaf_keys_twoway <- leaf_data_twoway %>%
+  distinct(Parc_norm, year_start) %>%
+  rename(Year = year_start, Parcel = Parc_norm)
+
+# === DETAILED THREE-WAY ANALYSIS ===
+cat("=== Detailed Three-Way Overlap Analysis ===\n")
+
+# Print unique key counts
+cat("Total unique parcel-year pairs per dataset:\n")
+cat("• Yield dataset:", nrow(yield_keys_twoway), "unique parcel-year pairs\n")
+cat("• Soil dataset: ", nrow(soil_keys_twoway), "unique parcel-year pairs\n")
+cat("• Leaf dataset: ", nrow(leaf_keys_twoway), "unique parcel-year pairs\n\n")
+
+# Find all possible overlaps using Venn diagram logic
+# 1. Common to all three datasets (intersection of all three)
+common_all_three_twoway <- yield_keys_twoway %>%
+  inner_join(soil_keys_twoway, by = c("Parcel", "Year")) %>%
+  inner_join(leaf_keys_twoway, by = c("Parcel", "Year"))
+
+# 2. Common to exactly two datasets (but NOT in the third)
+yield_soil_only <- yield_keys_twoway %>%
+  inner_join(soil_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys_twoway, by = c("Parcel", "Year"))
+
+yield_leaf_only <- yield_keys_twoway %>%
+  inner_join(leaf_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(soil_keys_twoway, by = c("Parcel", "Year"))
+
+soil_leaf_only <- soil_keys_twoway %>%
+  inner_join(leaf_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(yield_keys_twoway, by = c("Parcel", "Year"))
+
+# 3. Unique to exactly one dataset (not in any other)
+yield_only <- yield_keys_twoway %>%
+  anti_join(soil_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys_twoway, by = c("Parcel", "Year"))
+
+soil_only <- soil_keys_twoway %>%
+  anti_join(yield_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(leaf_keys_twoway, by = c("Parcel", "Year"))
+
+leaf_only <- leaf_keys_twoway %>%
+  anti_join(yield_keys_twoway, by = c("Parcel", "Year")) %>%
+  anti_join(soil_keys_twoway, by = c("Parcel", "Year"))
+
+# Print detailed results
+cat("OVERLAP ANALYSIS:\n")
+cat("• Common to ALL THREE datasets     :", nrow(common_all_three_twoway), "pairs\n")
+cat("• Common to Yield+Soil only        :", nrow(yield_soil_only), "pairs\n")
+cat("• Common to Yield+Leaf only        :", nrow(yield_leaf_only), "pairs\n")
+cat("• Common to Soil+Leaf only         :", nrow(soil_leaf_only), "pairs\n")
+cat("• Unique to Yield only             :", nrow(yield_only), "pairs\n")
+cat("• Unique to Soil only              :", nrow(soil_only), "pairs\n")
+cat("• Unique to Leaf only              :", nrow(leaf_only), "pairs\n\n")
+
+# Calculate linkable data (parcel-years that appear in all three datasets)
+total_potential_links <- nrow(common_all_three_twoway)
+total_unlinkable <- nrow(yield_only) + nrow(soil_only) + nrow(leaf_only) + 
+                   nrow(yield_soil_only) + nrow(yield_leaf_only) + nrow(soil_leaf_only)
+
+cat("LINKAGE SUMMARY:\n")
+cat("• ✅ FULLY LINKABLE (all 3 datasets):", total_potential_links, "parcel-year pairs\n")
+cat("• ❌ NOT FULLY LINKABLE              :", total_unlinkable, "parcel-year pairs\n")
+cat("• 📊 Linkage success rate           :", 
+    round(total_potential_links / (total_potential_links + total_unlinkable) * 100, 1), "%\n\n")
+
+# Show samples of fully linkable data
+cat("Sample of FULLY LINKABLE parcel-year pairs:\n")
+print(head(common_all_three_twoway, 10))
+
+# Prepare data for three-way plotting
+linkage_counts_threeway <- tibble(
+  Category = c("All Three\n(Linkable)", "Yield+Soil Only", "Yield+Leaf Only", "Soil+Leaf Only", 
+               "Yield Only", "Soil Only", "Leaf Only"),
+  Count = c(nrow(common_all_three_twoway), nrow(yield_soil_only), 
+            nrow(yield_leaf_only), nrow(soil_leaf_only),
+            nrow(yield_only), nrow(soil_only), nrow(leaf_only)),
+  Linkable = c("Yes", "No", "No", "No", "No", "No", "No")
+)
+
+# ---- 4. Three-way Bar plot ----
+plot_linkage_threeway <- ggplot(linkage_counts_threeway, aes(x = reorder(Category, Count), y = Count, fill = Linkable)) +
+  geom_col(width = 0.6, show.legend = TRUE) +
+  geom_text(aes(label = scales::comma(Count)), hjust = -0.1, size = 4) +
+  scale_fill_manual(values = c("Yes" = "#2E8B57", "No" = "#DC143C"), 
+                    name = "Fully Linkable", 
+                    labels = c("No" = "Not Linkable", "Yes" = "Linkable")) +
+  coord_flip() +
+  labs(title = "Three-Way Parcel-Year Linkage Analysis",
+       subtitle = paste0("Linkable pairs: ", scales::comma(total_potential_links), " | ",
+                         "Non-linkable pairs: ", scales::comma(total_unlinkable), " | ",
+                         "Success rate: ", round(total_potential_links / (total_potential_links + total_unlinkable) * 100, 1), "%"),
+       x = NULL,
+       y = "Number of Unique Parcel-Year Pairs") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.y = element_text(face = "bold"),
+        legend.position = "bottom")
+
+# ---- 5. Three-way Year distributions ----
+leaf_year_dist_twoway <- leaf_keys_twoway %>%
+  group_by(Year) %>%
+  summarise(Parcel_Count = n()) %>%
+  ungroup()
+
+plot_leaf_year_twoway <- ggplot(leaf_year_dist_twoway, aes(x = Year, y = Parcel_Count)) +
+  geom_col(fill = "#fdbf6f") +
+  scale_x_continuous(breaks = pretty(leaf_year_dist_twoway$Year, 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Leaf Data: Parcel-Year Counts by Year",
+       x = "Year",
+       y = "Number of Unique Parcels") +
+  theme_minimal(base_size = 13)
+
+# Combined three-way year plot
+plot_year_combined_threeway <- plot_yield_year_twoway / plot_soil_year_twoway / plot_leaf_year_twoway +
+  plot_annotation(title = "Yearly Distribution of Unique Parcel-Year Combinations (Three Datasets)",
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+# ---- 6. Create final layouts ----
+cat("=== Creating Two-Way Analysis Plots ===\n")
+plot_year_combined_twoway <- plot_yield_year_twoway | plot_soil_year_twoway + 
+  plot_annotation(title = "Two-Way Yearly Distribution",
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+final_plot_twoway <- plot_linkage_twoway | plot_pie_twoway
+combined_plot_twoway <- final_plot_twoway / plot_year_combined_twoway + 
+  plot_layout(heights = c(1, 2)) +
+  plot_annotation(caption = "Two-way analysis: Uppercase parcel names, spaces preserved.",
+                  theme = theme(plot.caption = element_text(size = 11, face = "italic")))
+
+cat("=== Creating Three-Way Analysis Plots ===\n")
+final_plot_threeway <- plot_linkage_threeway | plot_year_combined_threeway + 
+  plot_layout(widths = c(1.2, 1)) +
+  plot_annotation(caption = "Three-way analysis: Uppercase parcel names, spaces preserved.",
+                  theme = theme(plot.caption = element_text(size = 11, face = "italic")))
+
+# ---- Print plots ----
+print("Two-Way Analysis:")
+print(combined_plot_twoway)
+
+print("\nThree-Way Analysis:")
+print(final_plot_threeway)
+```
+
+## II.4. Correspondence Summary
+
+i\. Complete Matches Identifying parcel-year pairs present in all three datasets for integrated analysis.
+
+ii. Partial and Unique Records Documenting dataset-specific observations for selective analyses.
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(dplyr)
+library(stringr)
+
+# === PRÉPARATION DES DONNÉES ===
+
+# Normalisation des données avec majuscules et espaces préservés
+data_norm <- data %>%
+  mutate(Parcelle_norm = str_to_upper(Parcelle))
+
+soil_data_norm <- soil_data %>%
+  mutate(
+    Parc.Detaillee_norm = str_to_upper(Parc.Detaillee),
+    Annee = as.numeric(Annee)
+  )
+
+leaf_data_norm <- leaf_data_converted %>%
+  mutate(
+    year_start = as.numeric(str_extract(Campagne, "^\\d{4}")),
+    Parc_norm = str_to_upper(Parc.)
+  )
+
+# Création des clés uniques pour chaque jeu de données
+yield_keys <- data_norm %>%
+  distinct(Parcelle_norm, year_start) %>%
+  rename(Annee = year_start, Parcelle = Parcelle_norm)
+
+soil_keys <- soil_data_norm %>%
+  distinct(Parc.Detaillee_norm, Annee) %>%
+  rename(Parcelle = Parc.Detaillee_norm)
+
+leaf_keys <- leaf_data_norm %>%
+  distinct(Parc_norm, year_start) %>%
+  rename(Annee = year_start, Parcelle = Parc_norm)
+
+# === ANALYSE DES CORRESPONDANCES TOTALES ===
+
+# Correspondances complètes (présentes dans les trois jeux de données)
+correspondance_complete <- yield_keys %>%
+  inner_join(soil_keys, by = c("Parcelle", "Annee")) %>%
+  inner_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+# Correspondances à deux voies (incluant celles qui sont aussi dans le 3ème)
+rendement_sol_total <- yield_keys %>%
+  inner_join(soil_keys, by = c("Parcelle", "Annee"))
+
+rendement_feuille_total <- yield_keys %>%
+  inner_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+sol_feuille_total <- soil_keys %>%
+  inner_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+# Données uniques (présentes dans un seul jeu de données)
+unique_rendement <- yield_keys %>%
+  anti_join(soil_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+unique_sol <- soil_keys %>%
+  anti_join(yield_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+unique_feuille <- leaf_keys %>%
+  anti_join(yield_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(soil_keys, by = c("Parcelle", "Annee"))
+
+# Configuration du thème académique français
+theme_academique_fr <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    axis.title = element_text(size = 11, face = "bold"),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    strip.text = element_text(size = 11, face = "bold"),
+    plot.caption = element_text(size = 9, hjust = 0, face = "italic")
+  )
+
+# === GRAPHIQUE 1: CORRESPONDANCES TOTALES ===
+
+donnees_correspondance_totales <- tibble(
+  Categorie = c("Trois jeux\n(Correspondance complète)", 
+                "Rendement + Sol", 
+                "Rendement + Feuille", 
+                "Sol + Feuille"),
+  Nombre = c(nrow(correspondance_complete), 
+             nrow(rendement_sol_total), 
+             nrow(rendement_feuille_total), 
+             nrow(sol_feuille_total)),
+  Type = c("Complète", "Partielle", "Partielle", "Partielle")
+)
+
+graphique_correspondances_totales <- ggplot(donnees_correspondance_totales, 
+                                           aes(x = reorder(Categorie, Nombre), y = Nombre, fill = Type)) +
+  geom_col(width = 0.7, color = "white", size = 0.5) +
+  geom_text(aes(label = paste0("n = ", format(Nombre, big.mark = " "))), 
+            hjust = -0.1, size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = c("Complète" = "#2E8B57", "Partielle" = "#4682B4"),
+                    name = "Type de correspondance") +
+  coord_flip() +
+  labs(
+    title = "Correspondances totales entre jeux de données",
+    subtitle = "Nombre total de couples parcelle-année présents dans chaque combinaison",
+    x = "Catégories de correspondance",
+    y = "Nombre de couples parcelle-année uniques",
+    caption = "Note : Les correspondances à 2 jeux incluent celles présentes aussi dans le 3ème jeu"
+  ) +
+  theme_academique_fr +
+  scale_y_continuous(labels = function(x) format(x, big.mark = " "))
+
+# === GRAPHIQUE 2: RÉPARTITION PAR JEU DE DONNÉES ===
+
+donnees_jeux <- tibble(
+  Jeu_donnees = c("Rendement", "Sol", "Feuilles"),
+  Nombre_total = c(nrow(yield_keys), nrow(soil_keys), nrow(leaf_keys)),
+  Dans_correspondance_complete = c(
+    sum(yield_keys %>% semi_join(correspondance_complete, by = c("Parcelle", "Annee")) %>% nrow()),
+    sum(soil_keys %>% semi_join(correspondance_complete, by = c("Parcelle", "Annee")) %>% nrow()),
+    sum(leaf_keys %>% semi_join(correspondance_complete, by = c("Parcelle", "Annee")) %>% nrow())
+  )
+) %>%
+  mutate(
+    Taux_correspondance = Dans_correspondance_complete / Nombre_total * 100,
+    Uniquement_jeu = Nombre_total - Dans_correspondance_complete
+  )
+
+# Reformater pour ggplot
+donnees_jeux_long <- donnees_jeux %>%
+  select(Jeu_donnees, Dans_correspondance_complete, Uniquement_jeu) %>%
+  pivot_longer(cols = c(Dans_correspondance_complete, Uniquement_jeu),
+               names_to = "Statut", values_to = "Nombre") %>%
+  mutate(
+    Statut = case_when(
+      Statut == "Dans_correspondance_complete" ~ "Dans correspondance\ncomplète",
+      Statut == "Uniquement_jeu" ~ "Unique à ce jeu"
+    )
+  )
+
+graphique_jeux <- ggplot(donnees_jeux_long, aes(x = Jeu_donnees, y = Nombre, fill = Statut)) +
+  geom_col(position = "stack", width = 0.7, color = "white", size = 0.5) +
+  geom_text(data = donnees_jeux, 
+            aes(x = Jeu_donnees, y = Nombre_total + 50, 
+                label = paste0(round(Taux_correspondance, 1), "%")),
+            inherit.aes = FALSE, size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = c("Dans correspondance\ncomplète" = "#2E8B57", 
+                              "Unique à ce jeu" = "#DC143C"),
+                    name = "Statut des données") +
+  labs(
+    title = "Répartition des données par jeu",
+    subtitle = "Proportion des données présentes dans la correspondance complète",
+    x = "Jeux de données",
+    y = "Nombre de couples parcelle-année",
+    caption = "Pourcentages indiqués : taux de présence dans la correspondance complète"
+  ) +
+  theme_academique_fr +
+  scale_y_continuous(labels = function(x) format(x, big.mark = " "))
+
+# === GRAPHIQUE 3: RÉPARTITION PROPORTIONNELLE ===
+
+donnees_proportion <- tibble(
+  Categorie = c("Correspondance\ncomplète", "Données\nuniques"),
+  Nombre = c(nrow(correspondance_complete),
+             nrow(unique_rendement) + nrow(unique_sol) + nrow(unique_feuille)),
+  Couleur = c("#2E8B57", "#DC143C")
+)
+
+graphique_proportion <- ggplot(donnees_proportion, aes(x = "", y = Nombre, fill = Categorie)) +
+  geom_col(width = 1, color = "white", size = 0.8) +
+  coord_polar("y") +
+  scale_fill_manual(values = setNames(donnees_proportion$Couleur, donnees_proportion$Categorie)) +
+  geom_text(aes(label = paste0(format(Nombre, big.mark = " "), "\n(", 
+                               round(Nombre/sum(Nombre)*100, 1), "%)")),
+            position = position_stack(vjust = 0.5), 
+            size = 3.5, fontface = "bold", color = "white") +
+  labs(
+    title = "Répartition générale",
+    fill = "Type de données"
+  ) +
+  theme_academique_fr +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    axis.title = element_blank()
+  )
+
+# === GRAPHIQUE 4: ÉVOLUTION TEMPORELLE DES CORRESPONDANCES ===
+
+# Analyse par année des correspondances complètes
+correspondances_annuelles <- correspondance_complete %>%
+  count(Annee, name = "Correspondances_completes") %>%
+  full_join(
+    yield_keys %>% count(Annee, name = "Total_rendement"),
+    by = "Annee"
+  ) %>%
+  full_join(
+    soil_keys %>% count(Annee, name = "Total_sol"),
+    by = "Annee"
+  ) %>%
+  full_join(
+    leaf_keys %>% count(Annee, name = "Total_feuille"),
+    by = "Annee"
+  ) %>%
+  replace_na(list(Correspondances_completes = 0, Total_rendement = 0, 
+                  Total_sol = 0, Total_feuille = 0)) %>%
+  mutate(
+    Taux_correspondance = ifelse(pmax(Total_rendement, Total_sol, Total_feuille, na.rm = TRUE) > 0,
+                                Correspondances_completes / pmax(Total_rendement, Total_sol, Total_feuille, na.rm = TRUE) * 100,
+                                0)
+  )
+
+graphique_temporel <- ggplot(correspondances_annuelles, aes(x = Annee)) +
+  geom_col(aes(y = Correspondances_completes), fill = "#2E8B57", alpha = 0.8, width = 0.8) +
+  geom_line(aes(y = Taux_correspondance * max(Correspondances_completes, na.rm = TRUE) / 100), 
+            color = "#DC143C", size = 1.2, alpha = 0.8) +
+  geom_point(aes(y = Taux_correspondance * max(Correspondances_completes, na.rm = TRUE) / 100), 
+             color = "#DC143C", size = 2) +
+  scale_x_continuous(breaks = seq(min(correspondances_annuelles$Annee, na.rm = TRUE), 
+                                  max(correspondances_annuelles$Annee, na.rm = TRUE), by = 2)) +
+  scale_y_continuous(
+    name = "Nombre de correspondances complètes",
+    labels = function(x) format(x, big.mark = " "),
+    sec.axis = sec_axis(~ . * 100 / max(correspondances_annuelles$Correspondances_completes, na.rm = TRUE), 
+                       name = "Taux de correspondance (%)")
+  ) +
+  labs(
+    title = "Évolution temporelle des correspondances complètes",
+    subtitle = "Nombre de couples parcelle-année présents dans les trois jeux de données",
+    x = "Année",
+    caption = "Barres : nombre de correspondances | Ligne : taux de correspondance"
+  ) +
+  theme_academique_fr +
+  theme(
+    axis.title.y.right = element_text(color = "#DC143C", face = "bold"),
+    axis.text.y.right = element_text(color = "#DC143C")
+  )
+
+# === CRÉATION DU GRAPHIQUE COMBINÉ ===
+
+graphique_combine <- (graphique_correspondances_totales | graphique_jeux) / 
+                     (graphique_proportion | graphique_temporel) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title = "ANALYSE DES CORRESPONDANCES TOTALES ENTRE JEUX DE DONNÉES AGRICOLES",
+    subtitle = paste0("Analyse comparative des données de rendement, sol et feuilles | ",
+                     "Correspondances complètes : ", format(nrow(correspondance_complete), big.mark = " "), 
+                     " couples parcelle-année"),
+    caption = paste0("Note : Correspondance complète = présence dans les trois jeux de données (rendement, sol, feuilles)\n",
+                    "Les correspondances partielles incluent les chevauchements avec le troisième jeu\n",
+                    "Période d'analyse : ", min(c(yield_keys$Annee, soil_keys$Annee, leaf_keys$Annee), na.rm = TRUE),
+                    " - ", max(c(yield_keys$Annee, soil_keys$Annee, leaf_keys$Annee), na.rm = TRUE)),
+    theme = theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      plot.caption = element_text(size = 9, hjust = 0, face = "italic")
+    )
+  )
+
+# === SAUVEGARDE DES GRAPHIQUES ===
+
+# Créer le dossier de sortie s'il n'existe pas
+if (!dir.exists("graphiques_correspondances_totales")) {
+  dir.create("graphiques_correspondances_totales")
+}
+
+# Sauvegarde du graphique combiné principal
+ggsave(
+  filename = "graphiques_correspondances_totales/analyse_correspondances_totales.png",
+  plot = graphique_combine,
+  width = 16, height = 12, dpi = 300, units = "in",
+  bg = "white"
+)
+
+ggsave(
+  filename = "graphiques_correspondances_totales/analyse_correspondances_totales.pdf",
+  plot = graphique_combine,
+  width = 16, height = 12, units = "in",
+  bg = "white"
+)
+
+# Sauvegarde des graphiques individuels
+ggsave(
+  filename = "graphiques_correspondances_totales/correspondances_totales.png",
+  plot = graphique_correspondances_totales,
+  width = 10, height = 6, dpi = 300, units = "in",
+  bg = "white"
+)
+
+ggsave(
+  filename = "graphiques_correspondances_totales/repartition_jeux.png",
+  plot = graphique_jeux,
+  width = 10, height = 6, dpi = 300, units = "in",
+  bg = "white"
+)
+
+ggsave(
+  filename = "graphiques_correspondances_totales/repartition_proportionnelle.png",
+  plot = graphique_proportion,
+  width = 8, height = 6, dpi = 300, units = "in",
+  bg = "white"
+)
+
+ggsave(
+  filename = "graphiques_correspondances_totales/evolution_temporelle.png",
+  plot = graphique_temporel,
+  width = 12, height = 6, dpi = 300, units = "in",
+  bg = "white"
+)
+
+# === STATISTIQUES DESCRIPTIVES ===
+
+cat("=== RÉSUMÉ DE L'ANALYSE DES CORRESPONDANCES TOTALES ===\n\n")
+
+cat("JEUX DE DONNÉES UNIQUES :\n")
+cat("• Rendement :", format(nrow(yield_keys), big.mark = " "), "couples parcelle-année\n")
+cat("• Sol       :", format(nrow(soil_keys), big.mark = " "), "couples parcelle-année\n")
+cat("• Feuilles  :", format(nrow(leaf_keys), big.mark = " "), "couples parcelle-année\n\n")
+
+cat("CORRESPONDANCES TOTALES (avec chevauchements inclus) :\n")
+cat("• Rendement + Sol                      :", format(nrow(rendement_sol_total), big.mark = " "), "couples\n")
+cat("• Rendement + Feuilles                 :", format(nrow(rendement_feuille_total), big.mark = " "), "couples\n")
+cat("• Sol + Feuilles                       :", format(nrow(sol_feuille_total), big.mark = " "), "couples\n")
+cat("• Correspondance complète (3 jeux)     :", format(nrow(correspondance_complete), big.mark = " "), "couples\n\n")
+
+cat("DONNÉES UNIQUES (présentes dans un seul jeu) :\n")
+cat("• Rendement uniquement                 :", format(nrow(unique_rendement), big.mark = " "), "couples\n")
+cat("• Sol uniquement                       :", format(nrow(unique_sol), big.mark = " "), "couples\n")
+cat("• Feuilles uniquement                  :", format(nrow(unique_feuille), big.mark = " "), "couples\n\n")
+
+# Calcul des taux pour chaque jeu
+taux_rendement <- round(nrow(correspondance_complete) / nrow(yield_keys) * 100, 2)
+taux_sol <- round(nrow(correspondance_complete) / nrow(soil_keys) * 100, 2)
+taux_feuilles <- round(nrow(correspondance_complete) / nrow(leaf_keys) * 100, 2)
+
+cat("TAUX DE CORRESPONDANCE COMPLÈTE PAR JEU :\n")
+cat("• Rendement  :", taux_rendement, "% de ses données dans la correspondance complète\n")
+cat("• Sol        :", taux_sol, "% de ses données dans la correspondance complète\n")
+cat("• Feuilles   :", taux_feuilles, "% de ses données dans la correspondance complète\n\n")
+# Affichage du graphique principal
+print(graphique_combine)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# === PRÉPARATION DES DONNÉES ===
+
+# Normalisation des données avec majuscules et espaces préservés
+data_norm <- data %>%
+  mutate(Parcelle_norm = str_to_upper(Parcelle))
+
+soil_data_norm <- soil_data %>%
+  mutate(
+    Parc.Detaillee_norm = str_to_upper(Parc.Detaillee),
+    Annee = as.numeric(Annee)
+  )
+
+leaf_data_norm <- leaf_data_converted %>%
+  mutate(
+    year_start = as.numeric(str_extract(Campagne, "^\\d{4}")),
+    Parc_norm = str_to_upper(Parc.)
+  )
+
+# Création des clés uniques pour chaque jeu de données
+yield_keys <- data_norm %>%
+  distinct(Parcelle_norm, year_start) %>%
+  rename(Annee = year_start, Parcelle = Parcelle_norm)
+
+soil_keys <- soil_data_norm %>%
+  distinct(Parc.Detaillee_norm, Annee) %>%
+  rename(Parcelle = Parc.Detaillee_norm)
+
+leaf_keys <- leaf_data_norm %>%
+  distinct(Parc_norm, year_start) %>%
+  rename(Annee = year_start, Parcelle = Parc_norm)
+
+# === FONCTION POUR GÉNÉRER DES ÉCHANTILLONS ===
+generer_echantillons <- function(data, nom_dataset, n_sample = 10) {
+  if (nrow(data) == 0) {
+    return(paste0("Aucune donnée disponible pour ", nom_dataset))
+  }
+  
+  echantillon <- data %>%
+    sample_n(min(n_sample, nrow(data))) %>%
+    arrange(Annee, Parcelle) %>%
+    mutate(ligne = paste0("  • ", Parcelle, " (", Annee, ")"))
+  
+  return(echantillon$ligne)
+}
+
+# === CORRESPONDANCES POUR IDENTIFIER LES DONNÉES UNIQUES ===
+
+# Correspondances complètes (présentes dans les trois jeux de données)
+correspondance_complete <- yield_keys %>%
+  inner_join(soil_keys, by = c("Parcelle", "Annee")) %>%
+  inner_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+# Données uniques (présentes dans un seul jeu de données)
+unique_rendement <- yield_keys %>%
+  anti_join(soil_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+unique_sol <- soil_keys %>%
+  anti_join(yield_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(leaf_keys, by = c("Parcelle", "Annee"))
+
+unique_feuille <- leaf_keys %>%
+  anti_join(yield_keys, by = c("Parcelle", "Annee")) %>%
+  anti_join(soil_keys, by = c("Parcelle", "Annee"))
+
+# === ANALYSE DES PLAGES TEMPORELLES ===
+
+analyser_plage_temporelle <- function(data, nom_dataset) {
+  if (nrow(data) == 0) {
+    return(list(
+      min_annee = NA,
+      max_annee = NA,
+      nb_annees = 0,
+      annees_manquantes = NA,
+      resume = paste0("Aucune donnée pour ", nom_dataset)
+    ))
+  }
+  
+  min_annee <- min(data$Annee, na.rm = TRUE)
+  max_annee <- max(data$Annee, na.rm = TRUE)
+  annees_presentes <- sort(unique(data$Annee))
+  annees_completes <- seq(min_annee, max_annee)
+  annees_manquantes <- setdiff(annees_completes, annees_presentes)
+  
+  return(list(
+    min_annee = min_annee,
+    max_annee = max_annee,
+    nb_annees = length(annees_presentes),
+    nb_annees_possibles = length(annees_completes),
+    annees_presentes = annees_presentes,
+    annees_manquantes = annees_manquantes,
+    taux_completude = round(length(annees_presentes) / length(annees_completes) * 100, 1)
+  ))
+}
+
+# Analyse des plages temporelles pour chaque jeu de données
+plage_rendement <- analyser_plage_temporelle(yield_keys, "Rendement")
+plage_sol <- analyser_plage_temporelle(soil_keys, "Sol")
+plage_feuille <- analyser_plage_temporelle(leaf_keys, "Feuilles")
+plage_correspondance_complete <- analyser_plage_temporelle(correspondance_complete, "Correspondance complète")
+
+# === ANALYSE DES PARCELLES UNIQUES ===
+
+analyser_parcelles <- function(data, nom_dataset) {
+  if (nrow(data) == 0) {
+    return(list(
+      nb_parcelles_uniques = 0,
+      parcelles_les_plus_frequentes = character(0),
+      resume = paste0("Aucune parcelle pour ", nom_dataset)
+    ))
+  }
+  
+  parcelles_freq <- data %>%
+    count(Parcelle, sort = TRUE)
+  
+  return(list(
+    nb_parcelles_uniques = nrow(parcelles_freq),
+    parcelles_les_plus_frequentes = head(parcelles_freq, 5),
+    nb_observations_total = nrow(data)
+  ))
+}
+
+parcelles_rendement <- analyser_parcelles(yield_keys, "Rendement")
+parcelles_sol <- analyser_parcelles(soil_keys, "Sol")
+parcelles_feuille <- analyser_parcelles(leaf_keys, "Feuilles")
+
+# === 1. STATISTIQUES GÉNÉRALES ===
+cat("📊 STATISTIQUES GÉNÉRALES\n")
+cat("═══════════════════════════\n\n")
+
+cat("TOTAL DES OBSERVATIONS PAR JEU DE DONNÉES :\n")
+cat("• Rendement :", format(nrow(yield_keys), big.mark = " "), "couples parcelle-année\n")
+cat("• Sol       :", format(nrow(soil_keys), big.mark = " "), "couples parcelle-année\n")
+cat("• Feuilles  :", format(nrow(leaf_keys), big.mark = " "), "couples parcelle-année\n")
+cat("• Correspondance complète :", format(nrow(correspondance_complete), big.mark = " "), "couples parcelle-année\n\n")
+
+cat("NOMBRE DE PARCELLES UNIQUES PAR JEU :\n")
+cat("• Rendement :", format(parcelles_rendement$nb_parcelles_uniques, big.mark = " "), "parcelles\n")
+cat("• Sol       :", format(parcelles_sol$nb_parcelles_uniques, big.mark = " "), "parcelles\n")
+cat("• Feuilles  :", format(parcelles_feuille$nb_parcelles_uniques, big.mark = " "), "parcelles\n\n")
+
+# === 2. PLAGES TEMPORELLES ===
+cat("📅 PLAGES TEMPORELLES\n")
+cat("══════════════════════\n\n")
+
+afficher_plage <- function(plage, nom) {
+  cat(paste0("▶ ", nom, " :\n"))
+  if (is.na(plage$min_annee)) {
+    cat("  Aucune donnée disponible\n\n")
+    return()
+  }
+  
+  cat("  • Période :", plage$min_annee, "-", plage$max_annee, 
+      "(", plage$max_annee - plage$min_annee + 1, "ans de couverture possible)\n")
+  cat("  • Années avec données :", plage$nb_annees, "/", plage$nb_annees_possibles,
+      "(", plage$taux_completude, "% de complétude temporelle)\n")
+  
+  if (length(plage$annees_manquantes) > 0 && length(plage$annees_manquantes) <= 10) {
+    cat("  • Années manquantes :", paste(plage$annees_manquantes, collapse = ", "), "\n")
+  } else if (length(plage$annees_manquantes) > 10) {
+    cat("  • Années manquantes :", length(plage$annees_manquantes), "années (",
+        paste(head(plage$annees_manquantes, 3), collapse = ", "), "...)\n")
+  } else {
+    cat("  • Couverture temporelle complète ✓\n")
+  }
+  cat("\n")
+}
+
+afficher_plage(plage_rendement, "DONNÉES DE RENDEMENT")
+afficher_plage(plage_sol, "DONNÉES DE SOL")
+afficher_plage(plage_feuille, "DONNÉES DE FEUILLES")
+afficher_plage(plage_correspondance_complete, "CORRESPONDANCE COMPLÈTE")
+
+# === 3. DONNÉES UNIQUES (présentes dans un seul jeu) ===
+cat("🔍 DONNÉES UNIQUES (présentes dans un seul jeu de données)\n")
+cat("══════════════════════════════════════════════════════════\n\n")
+
+cat("▶ RENDEMENT UNIQUEMENT :\n")
+cat("  Nombre :", format(nrow(unique_rendement), big.mark = " "), "couples parcelle-année\n")
+if (nrow(unique_rendement) > 0) {
+  cat("  Échantillons :\n")
+  echantillons <- generer_echantillons(unique_rendement, "Rendement")
+  cat(paste(echantillons, collapse = "\n"), "\n")
+} else {
+  cat("  Aucune donnée unique au jeu de rendement\n")
+}
+cat("\n")
+
+cat("▶ SOL UNIQUEMENT :\n")
+cat("  Nombre :", format(nrow(unique_sol), big.mark = " "), "couples parcelle-année\n")
+if (nrow(unique_sol) > 0) {
+  cat("  Échantillons :\n")
+  echantillons <- generer_echantillons(unique_sol, "Sol")
+  cat(paste(echantillons, collapse = "\n"), "\n")
+} else {
+  cat("  Aucune donnée unique au jeu de sol\n")
+}
+cat("\n")
+
+cat("▶ FEUILLES UNIQUEMENT :\n")
+cat("  Nombre :", format(nrow(unique_feuille), big.mark = " "), "couples parcelle-année\n")
+if (nrow(unique_feuille) > 0) {
+  cat("  Échantillons :\n")
+  echantillons <- generer_echantillons(unique_feuille, "Feuilles")
+  cat(paste(echantillons, collapse = "\n"), "\n")
+} else {
+  cat("  Aucune donnée unique au jeu de feuilles\n")
+}
+cat("\n")
+
+# === 4. PARCELLES LES PLUS REPRÉSENTÉES ===
+cat("📍 PARCELLES LES PLUS REPRÉSENTÉES\n")
+cat("═══════════════════════════════════\n\n")
+
+afficher_top_parcelles <- function(parcelles_info, nom) {
+  cat(paste0("▶ ", nom, " :\n"))
+  if (nrow(parcelles_info$parcelles_les_plus_frequentes) > 0) {
+    for (i in 1:nrow(parcelles_info$parcelles_les_plus_frequentes)) {
+      parcelle <- parcelles_info$parcelles_les_plus_frequentes[i, ]
+      cat("  ", i, ". ", parcelle$Parcelle, " (", parcelle$n, " observations)\n")
+    }
+  } else {
+    cat("  Aucune donnée disponible\n")
+  }
+  cat("\n")
+}
+
+afficher_top_parcelles(parcelles_rendement, "RENDEMENT")
+afficher_top_parcelles(parcelles_sol, "SOL")
+afficher_top_parcelles(parcelles_feuille, "FEUILLES")
+
+# === 5. RÉSUMÉ GLOBAL ===
+cat("📋 RÉSUMÉ GLOBAL\n")
+cat("═════════════════\n\n")
+
+total_observations <- nrow(yield_keys) + nrow(soil_keys) + nrow(leaf_keys)
+total_unique <- nrow(unique_rendement) + nrow(unique_sol) + nrow(unique_feuille)
+taux_correspondance_complete <- round(nrow(correspondance_complete) / total_observations * 100, 2)
+taux_donnees_uniques <- round(total_unique / total_observations * 100, 2)
+
+# Période globale
+all_years <- c(yield_keys$Annee, soil_keys$Annee, leaf_keys$Annee)
+periode_globale_min <- min(all_years, na.rm = TRUE)
+periode_globale_max <- max(all_years, na.rm = TRUE)
+
+cat("• Période d'étude globale :", periode_globale_min, "-", periode_globale_max, 
+    "(", periode_globale_max - periode_globale_min + 1, "années)\n")
+cat("• Total des observations :", format(total_observations, big.mark = " "), "couples parcelle-année\n")
+cat("• Correspondance complète :", format(nrow(correspondance_complete), big.mark = " "), 
+    "couples (", round(nrow(correspondance_complete) / total_observations * 100, 1), "% du total)\n")
+cat("• Données uniques :", format(total_unique, big.mark = " "), 
+    "couples (", taux_donnees_uniques, "% du total)\n")
+
+# Efficacité de la correspondance
+efficacite_max_possible <- min(nrow(yield_keys), nrow(soil_keys), nrow(leaf_keys))
+efficacite_reelle <- round(nrow(correspondance_complete) / efficacite_max_possible * 100, 1)
+cat("• Efficacité de correspondance :", efficacite_reelle, "% (vs maximum théorique possible)\n\n")
+
+```
+
+```{r}
+# Convert key variables
+leaf_data_converted$Tc_Ha_A <- as.numeric(gsub(",", ".", leaf_data_converted$Tc.Ha_A))
+leaf_data_converted$T_pol_canne <- as.numeric(gsub(",", ".", leaf_data_converted$T_pol_canne))
+leaf_data_converted$T_canne_reelle <- as.numeric(gsub(",", ".", leaf_data_converted$T_canne_reelle))
+
+# Extract year from campaign
+leaf_data_converted$Year <- as.numeric(str_extract(leaf_data_converted$Campagne, "\\d{4}"))
+leaf_data_converted$Variete <- as.factor(leaf_data_converted$Variete)
+
+# Calculate sugar efficiency
+leaf_data_converted$Sugar_efficiency <- (leaf_data_converted$T_pol_canne / leaf_data_converted$T_canne_reelle) * 100
+
+cat("Data prepared successfully!\n")
+print(paste("Years available:", paste(unique(leaf_data_converted$Year), collapse = ", ")))
+print(paste("Varieties:", paste(unique(leaf_data_converted$Variete), collapse = ", ")))
+
+
+# ===============================
+# 1. TREND EVOLUTION WITH SE + LOESS - COMBINED PLOT
+# ===============================
+
+create_combined_trends <- function(data) {
+  
+  # Prepare data for trends
+  trend_data <- data %>%
+    filter(!is.na(Year) & !is.na(Tc_Ha_A) & !is.na(T_pol_canne)) %>%
+    group_by(Year) %>%
+    summarise(
+      Tc_mean = mean(Tc_Ha_A, na.rm = TRUE),
+      Tc_se = sd(Tc_Ha_A, na.rm = TRUE) / sqrt(n()),
+      Tc_sd = sd(Tc_Ha_A, na.rm = TRUE),
+      Pol_mean = mean(T_pol_canne, na.rm = TRUE),
+      Pol_se = sd(T_pol_canne, na.rm = TRUE) / sqrt(n()),
+      Pol_sd = sd(T_pol_canne, na.rm = TRUE),
+      n = n(),
+      .groups = 'drop'
+    )
+  
+  # Create dual-axis plot
+  p1 <- ggplot(trend_data, aes(x = Year)) +
+    geom_line(aes(y = Tc_mean), color = "#e74c3c", size = 1.5, alpha = 0.8) +
+    geom_point(aes(y = Tc_mean), color = "#e74c3c", size = 4, alpha = 0.9) +
+    geom_errorbar(aes(ymin = Tc_mean - Tc_se, ymax = Tc_mean + Tc_se), 
+                  color = "#e74c3c", width = 0.2, size = 1, alpha = 0.7) +
+    geom_smooth(aes(y = Tc_mean), method = "loess", se = TRUE, 
+                color = "#c0392b", fill = "#e74c3c", alpha = 0.3, span = 0.8) +
+    labs(title = "Sugarcane Yield Evolution - Senegal Sahel Region",
+         subtitle = "Tc/Ha with Standard Error bars and LOESS smoothing",
+         x = "Year", 
+         y = "Tc/Ha (Tons per Hectare)",
+         caption = "Error bars represent ±1 SE") +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    scale_y_continuous(labels = comma_format()) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray60"),
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  
+  p2 <- ggplot(trend_data, aes(x = Year)) +
+    geom_line(aes(y = Pol_mean), color = "#3498db", size = 1.5, alpha = 0.8) +
+    geom_point(aes(y = Pol_mean), color = "#3498db", size = 4, alpha = 0.9) +
+    geom_errorbar(aes(ymin = Pol_mean - Pol_se, ymax = Pol_mean + Pol_se), 
+                  color = "#3498db", width = 0.2, size = 1, alpha = 0.7) +
+    geom_smooth(aes(y = Pol_mean), method = "loess", se = TRUE, 
+                color = "#2980b9", fill = "#3498db", alpha = 0.3, span = 0.8) +
+    labs(title = "Sugar Content (Pol) Evolution",
+         subtitle = "T_pol/canne with Standard Error bars and LOESS smoothing",
+         x = "Year", 
+         y = "T_pol/canne (Pol tons per cane)",
+         caption = "Error bars represent ±1 SE") +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    scale_y_continuous(labels = comma_format()) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray60"),
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  
+  return(list(tc_plot = p1, pol_plot = p2, trend_data = trend_data))
+}
+
+trend_results <- create_combined_trends(leaf_data_converted)
+print(trend_results$tc_plot)
+print(trend_results$pol_plot)
+
+
+# ===============================
+# 2. COMBINED DUAL-AXIS PLOT
+# ===============================
+create_dual_axis_plot <- function(data) {
+  
+  trend_data <- data %>%
+    filter(!is.na(Year) & !is.na(Tc_Ha_A) & !is.na(T_pol_canne)) %>%
+    group_by(Year) %>%
+    summarise(
+      Tc_mean = mean(Tc_Ha_A, na.rm = TRUE),
+      Tc_se = sd(Tc_Ha_A, na.rm = TRUE) / sqrt(n()),
+      Pol_mean = mean(T_pol_canne, na.rm = TRUE),
+      Pol_se = sd(T_pol_canne, na.rm = TRUE) / sqrt(n()),
+      .groups = 'drop'
+    )
+  
+  # Scale factor for dual axis
+  scale_factor <- max(trend_data$Tc_mean, na.rm = TRUE) / max(trend_data$Pol_mean, na.rm = TRUE)
+  
+  p_dual <- ggplot(trend_data, aes(x = Year)) +
+    # Primary axis (Tc/Ha_A)
+    geom_line(aes(y = Tc_mean, color = "Tc/Ha"), size = 1.5) +
+    geom_point(aes(y = Tc_mean, color = "Tc/Ha"), size = 4) +
+    geom_errorbar(aes(ymin = Tc_mean - Tc_se, ymax = Tc_mean + Tc_se, color = "Tc/Ha"), 
+                  width = 0.2, alpha = 0.7) +
+    geom_smooth(aes(y = Tc_mean), method = "loess", se = TRUE, 
+                color = "#e74c3c", fill = "#e74c3c", alpha = 0.2) +
+    
+    # Secondary axis (T_pol_canne scaled)
+    geom_line(aes(y = Pol_mean * scale_factor, color = "T_pol/canne"), size = 1.5) +
+    geom_point(aes(y = Pol_mean * scale_factor, color = "T_pol/canne"), size = 4) +
+    geom_errorbar(aes(ymin = (Pol_mean - Pol_se) * scale_factor, 
+                     ymax = (Pol_mean + Pol_se) * scale_factor, color = "T_pol/canne"), 
+                  width = 0.2, alpha = 0.7) +
+    geom_smooth(aes(y = Pol_mean * scale_factor), method = "loess", se = TRUE, 
+                color = "#3498db", fill = "#3498db", alpha = 0.2) +
+    
+    scale_color_manual(values = c("Tc/Ha" = "#e74c3c", "T_pol/canne" = "#3498db")) +
+    
+    scale_y_continuous(
+      name = "Tc/Ha (Tons per Hectare)",
+      sec.axis = sec_axis(~./scale_factor, name = "T_pol/canne (Pol tons)")
+    ) +
+    
+    labs(title = "Combined Sugarcane Yield Evolution",
+         subtitle = "Tc/Ha and T_pol/canne trends with LOESS smoothing and SE bars",
+         x = "Year",
+         color = "Parameter",
+         caption = "Dual-axis plot with independent LOESS trends") +
+    
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      axis.title.y = element_text(color = "#e74c3c", face = "bold"),
+      axis.title.y.right = element_text(color = "#3498db", face = "bold"),
+      legend.position = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  
+  return(p_dual)
+}
+
+dual_plot <- create_dual_axis_plot(leaf_data_converted)
+print(dual_plot)
+
+# ===============================
+# 3. BOXPLOTS BY YEAR AND VARIETY
+# ===============================
+
+create_comprehensive_boxplots <- function(data) {
+  
+  clean_data <- data %>%
+    filter(!is.na(Year) & !is.na(Tc_Ha_A) & !is.na(T_pol_canne) & !is.na(Variete))
+  
+  # Tc/Ha_A boxplots by year
+  p1 <- ggplot(clean_data, aes(x = factor(Year), y = Tc_Ha_A)) +
+    geom_violin(alpha = 0.6, fill = "#e74c3c") +
+    geom_boxplot(width = 0.3, alpha = 0.8, outlier.color = "#c0392b") +
+    stat_summary(fun = mean, geom = "point", size = 3, color = "white", shape = 21, fill = "red") +
+    labs(title = "Tc/Ha Distribution by Year",
+         subtitle = "Violin plots with boxplots and mean points",
+         x = "Year", y = "Tc/Ha (Tons per Hectare)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # T_pol_canne boxplots by year
+  p2 <- ggplot(clean_data, aes(x = factor(Year), y = T_pol_canne)) +
+    geom_violin(alpha = 0.6, fill = "#3498db") +
+    geom_boxplot(width = 0.3, alpha = 0.8, outlier.color = "#2980b9") +
+    stat_summary(fun = mean, geom = "point", size = 3, color = "white", shape = 21, fill = "blue") +
+    labs(title = "T_pol/canne Distribution by Year",
+         subtitle = "Violin plots with boxplots and mean points", 
+         x = "Year", y = "T_pol/canne (Pol tons)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Variety comparison
+  p3 <- ggplot(clean_data, aes(x = Variete, y = Tc_Ha_A, fill = Variete)) +
+    geom_boxplot(alpha = 0.8, outlier.alpha = 0.6) +
+    geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
+    stat_summary(fun = mean, geom = "point", size = 3, color = "red", shape = 18) +
+    facet_wrap(~Year, scales = "free_x") +
+    scale_fill_viridis_d() +
+    labs(title = "Tc/Ha by Variety Across Years",
+         x = "Variety", y = "Tc/Ha (Tons per Hectare)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none")
+  
+  # Sugar efficiency comparison
+  p4 <- ggplot(clean_data, aes(x = Variete, y = Sugar_efficiency, fill = Variete)) +
+    geom_boxplot(alpha = 0.8, outlier.alpha = 0.6) +
+    geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
+    stat_summary(fun = mean, geom = "point", size = 3, color = "red", shape = 18) +
+    facet_wrap(~Year, scales = "free_x") +
+    scale_fill_viridis_d() +
+    labs(title = "Sugar Efficiency by Variety Across Years",
+         x = "Variety", y = "Sugar Efficiency (%)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none")
+  
+  return(list(tc_year = p1, pol_year = p2, tc_variety = p3, sugar_variety = p4))
+}
+
+boxplot_results <- create_comprehensive_boxplots(leaf_data_converted)
+grid.arrange(boxplot_results$tc_year, boxplot_results$pol_year, ncol = 2)
+print(boxplot_results$tc_variety)
+print(boxplot_results$sugar_variety)
+
+# ===============================
+# 4. STATISTICAL SUMMARY AND TRENDS
+# ===============================
+
+yearly_summary <- leaf_data_converted %>%
+  filter(!is.na(Year) & !is.na(Tc_Ha_A) & !is.na(T_pol_canne)) %>%
+  group_by(Year) %>%
+  summarise(
+    n = n(),
+    Tc_mean = round(mean(Tc_Ha_A, na.rm = TRUE), 2),
+    Tc_median = round(median(Tc_Ha_A, na.rm = TRUE), 2),
+    Tc_sd = round(sd(Tc_Ha_A, na.rm = TRUE), 2),
+    Tc_se = round(sd(Tc_Ha_A, na.rm = TRUE) / sqrt(n()), 2),
+    Pol_mean = round(mean(T_pol_canne, na.rm = TRUE), 2),
+    Pol_median = round(median(T_pol_canne, na.rm = TRUE), 2), 
+    Pol_sd = round(sd(T_pol_canne, na.rm = TRUE), 2),
+    Pol_se = round(sd(T_pol_canne, na.rm = TRUE) / sqrt(n()), 2),
+    Sugar_eff_mean = round(mean(Sugar_efficiency, na.rm = TRUE), 2),
+    .groups = 'drop'
+  )
+
+cat("\n=== YEARLY SUMMARY STATISTICS ===\n")
+print(yearly_summary)
+
+variety_summary <- leaf_data_converted %>%
+  filter(!is.na(Variete) & !is.na(Tc_Ha_A) & !is.na(T_pol_canne)) %>%
+  group_by(Variete) %>%
+  summarise(
+    n = n(),
+    years = paste(unique(Year), collapse = ", "),
+    Tc_mean = round(mean(Tc_Ha_A, na.rm = TRUE), 2),
+    Tc_sd = round(sd(Tc_Ha_A, na.rm = TRUE), 2),
+    Pol_mean = round(mean(T_pol_canne, na.rm = TRUE), 2),
+    Pol_sd = round(sd(T_pol_canne, na.rm = TRUE), 2),
+    Sugar_eff_mean = round(mean(Sugar_efficiency, na.rm = TRUE), 2),
+    .groups = 'drop'
+  )
+
+cat("\n=== VARIETY SUMMARY STATISTICS ===\n")
+print(variety_summary)
+
+# ===============================
+# 5. COMBINED GRID LAYOUT
+# ===============================
+
+create_dashboard <- function() {
+  trends <- create_combined_trends(leaf_data_converted)
+  boxplots <- create_comprehensive_boxplots(leaf_data_converted)
+  combined_grid <- grid.arrange(
+    trends$tc_plot, trends$pol_plot,
+    boxplots$tc_year, boxplots$pol_year,
+    ncol = 2, nrow = 2,
+    top = "Sugarcane Production Analysis Dashboard - Senegal"
+  )
+  return(combined_grid)
+}
+
+dashboard <- create_dashboard()
+```
+
+# III. SUGARCANE NPK ANALYSIS (Visualization and Trend Analysis)
+
+```{r}
+# ===============================
+# SUGARCANE NPK ANALYSIS 
+# Visualization and Trend Analysis
+# ===============================
+
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(corrplot)
+library(pheatmap)
+library(viridis)
+library(RColorBrewer)
+library(gridExtra)
+library(scales)
+library(broom)
+library(GGally)
+library(factoextra)
+library(FactoMineR)
+
+
+
+cat("SUGARCANE DATASET ANALYSIS - SENEGAL\n")
+cat("====================================\n")
+print(dim(leaf_data_converted))
+print(head(leaf_data_converted, 3))
+
+# ===============================
+# 1. DATA PREPROCESSING
+# ===============================
+
+cat("Actual column names:\n")
+print(names(leaf_data_converted))
+
+original_names <- names(leaf_data_converted)
+
+leaf_data_converted$N_pct <- as.numeric(gsub(",", ".", leaf_data_converted$N.))
+leaf_data_converted$P_pct <- as.numeric(gsub(",", ".", leaf_data_converted$X.P))
+leaf_data_converted$K_pct <- as.numeric(gsub(",", ".", leaf_data_converted$X.K))
+leaf_data_converted$Tc_Ha_A_1 <- as.numeric(gsub(",", ".", leaf_data_converted$Tc.Ha_A.1))
+leaf_data_converted$RH_pctC_A_1 <- as.numeric(gsub(",", ".", leaf_data_converted$RH.C_A.1))
+leaf_data_converted$Tc_Ha_A <- as.numeric(gsub(",", ".", leaf_data_converted$Tc.Ha_A))
+leaf_data_converted$RH_pctC_A <- as.numeric(gsub(",", ".", leaf_data_converted$RH.C_A))
+leaf_data_converted$T_canne_reelle <- as.numeric(gsub(",", ".", leaf_data_converted$T_canne_reelle))
+leaf_data_converted$T_pol_canne <- as.numeric(gsub(",", ".", leaf_data_converted$T_pol_canne))
+leaf_data_converted$H2O_feuilles <- as.numeric(gsub(",", ".", leaf_data_converted$H2O_feuilles))
+leaf_data_converted$H20_gaines <- as.numeric(gsub(",", ".", leaf_data_converted$H20_gaines))
+leaf_data_converted$Age_prel_ <- as.numeric(gsub(",", ".", leaf_data_converted$Age_prel))
+
+leaf_data_converted$Variete <- as.factor(leaf_data_converted$Variete)
+leaf_data_converted$Ferme <- as.factor(leaf_data_converted$Ferme)
+leaf_data_converted$Campagne <- as.factor(leaf_data_converted$Campagne)
+
+leaf_data_converted$NPK_ratio <- leaf_data_converted$N_pct / (leaf_data_converted$P_pct + leaf_data_converted$K_pct)
+leaf_data_converted$Sugar_efficiency <- leaf_data_converted$T_pol_canne / leaf_data_converted$T_canne_reelle * 100
+leaf_data_converted$Biomass_index <- leaf_data_converted$T_canne_reelle / leaf_data_converted$Surf
+
+# ===============================
+# 2. NPK TREND ANALYSIS WITH LOESS AND CONFIDENCE INTERVALS
+# ===============================
+
+create_npk_trends <- function(data) {
+  npk_long <- data %>%
+    select(Age_prel_, N_pct, P_pct, K_pct, Variete, Campagne) %>%
+    filter(!is.na(Age_prel_) & !is.na(N_pct) & !is.na(P_pct) & !is.na(K_pct)) %>%
+    pivot_longer(cols = c(N_pct, P_pct, K_pct), names_to = "Nutrient", values_to = "Concentration")
+
+  p1 <- ggplot(npk_long, aes(x = Age_prel_, y = Concentration, color = Nutrient)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_smooth(method = "loess", se = TRUE, span = 0.7, size = 1.2) +
+    facet_wrap(~Nutrient, scales = "free_y", ncol = 3) +
+    scale_color_manual(values = c("N_pct" = "#e74c3c", "P_pct" = "#3498db", "K_pct" = "#2ecc71")) +
+    labs(title = "NPK Concentration Trends Over Plant Age",
+         subtitle = "LOESS smoothing with 95% confidence intervals",
+         x = "Plant Age (days)", y = "Nutrient Concentration (%)",
+         caption = "Sugarcane - Senegal Sahel Region") +
+    theme_minimal()
+  return(p1)
+}
+
+npk_plot <- create_npk_trends(leaf_data_converted)
+print(npk_plot)
+
+# ===============================
+# 3. NPK vs BIOMASS AND SUGAR CONTENT ANALYSIS
+# ===============================
+
+create_npk_biomass_plots <- function(data) {
+  clean_data <- data %>%
+    filter(!is.na(N_pct) & !is.na(P_pct) & !is.na(K_pct) &
+           !is.na(T_canne_reelle) & !is.na(T_pol_canne))
+
+  clean_data$Sugar_efficiency <- clean_data$T_pol_canne / clean_data$T_canne_reelle * 100
+
+  p1 <- ggplot(clean_data, aes(x = N_pct, y = T_canne_reelle)) +
+    geom_point(aes(color = Variete), size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, color = "darkred", size = 1.2)
+
+  p2 <- ggplot(clean_data, aes(x = P_pct, y = T_pol_canne)) +
+    geom_point(aes(color = Variete), size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, color = "darkblue", size = 1.2)
+
+  p3 <- ggplot(clean_data, aes(x = K_pct, y = Sugar_efficiency)) +
+    geom_point(aes(color = Variete), size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, color = "darkgreen", size = 1.2)
+
+  clean_data$NP_ratio <- clean_data$N_pct / clean_data$P_pct
+  p4 <- ggplot(clean_data, aes(x = NP_ratio, y = T_canne_reelle)) +
+    geom_point(aes(color = Sugar_efficiency, size = T_pol_canne), alpha = 0.7) +
+    geom_smooth(method = "loess", se = TRUE, color = "purple", size = 1.2)
+
+  return(list(p1, p2, p3, p4))
+}
+
+biomass_plots <- create_npk_biomass_plots(leaf_data_converted)
+grid.arrange(grobs = biomass_plots, ncol = 2)
+
+# ===============================
+# 4. ADVANCED CORRELATION MATRIX AND HEATMAPS
+# ===============================
+
+numerical_vars <- leaf_data_converted %>%
+  select(N_pct, X.P, X.K, H2O_feuilles, H20_gaines,
+         T_canne_reelle, T_pol_canne, Tc_Ha_A_1, RH_pctC_A_1,
+         Age_prel_, Surf, Sugar_efficiency, NPK_ratio) %>%
+  select_if(is.numeric)
+
+cor_data <- numerical_vars[complete.cases(numerical_vars), ]
+cor_matrix <- cor(cor_data)
+
+corrplot(cor_matrix, method = "color", type = "upper")
+
+pheatmap(cor_matrix,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete")
+
+```
+
+# IV. Descriptive Statistics
+
+```{r}
+colnames(leaf_data) <- c(
+  "Campaign", "Note", "Plot", "Farm", "Variety",
+  "Surface_ha", "Crop_Cycle", "Planting_date", "A_ce_jour",
+  "Yield_tonnes_ha_year_minus_1", "Cane_Moisture_percent_year_minus_1",
+  "Sampling_date", "Sampling_Age", "Leaf_Moisture_percent",
+  "Sheath_Moisture_percent", "Analysis_Date", "Nitrogen_percent",
+  "Phosphorus_percent", "Potassium_percent", "Harvest_Date",
+  "Yield_tonnes_ha_year_actual", "Cane_Moisture_percent_year_actual", "Growth_Period",
+  "Period_Validation", "Plot_Campaign", "Harvest_Validation",
+  "Real_T_canne", "T_Pol_canne",
+  "Irrigation_Type", "Age_weeks", "Harvest_Age_year",
+  "Agricultural_Surface_ha", "Surface_Age_days", "Harvest_Month",
+  "Week_Number", "Common_Harvest_Date", "Data_Day",
+  "Sampling_Month"
+)
+```
+
+## IV.1. Dataset basic information
+
+```{r}
+# Display basic information about the dataset
+cat("Dataset dimensions:", dim(leaf_data), "\n")
+cat("Number of rows:", nrow(leaf_data), "\n")
+cat("Number of columns:", ncol(leaf_data), "\n")
+
+# Display column names
+cat("\nColumn names:\n")
+print(colnames(leaf_data))
+```
+
+## IV.2. Data Type Identification and Conversion
+
+```{r}
+# ===============================
+cat("2. DATA TYPE IDENTIFICATION AND CONVERSION\n")
+cat("==========================================\n")
+
+# Define data types based on domain knowledge
+factor_variables <- c(
+  "Campaign",                  # Campaign
+  "Note",              # Note
+  "Plot",                       # Plot
+  "Farm",                       # Farm
+  "Variety",                    # Variety
+  "Crop_Cycle",                 # Cycle
+  "Growth_Period",              # Period
+  "Period_Validation",          # Period validation
+  "Plot_Campaign",              # Campaign plot
+  "Harvest_Validation",         # Harvest validation
+  "Irrigation_Type",            # Irrigation type
+  "Harvest_Month",              # Harvest month
+  "Sampling_Month",
+  "Week_Number",
+  "Data_Day"
+)
+
+# Date variables
+date_variables <- c(
+  "Planting_date",             # Planting date
+  "Sampling_date",                   # Sampling date
+  "Analysis_Date",               # Analysis date
+  "Harvest_Date",                # Harvest date
+  "Common_Harvest_Date"          # Common harvest date
+)
+
+# Numerical variables
+numerical_variables <- c(
+  "Surface_ha",  
+  "A_ce_jour",
+  "Sampling_Age",                 
+  "Yield_tonnes_ha_year_minus_1",               
+  "Cane_Moisture_percent_year_minus_1",         
+  "Leaf_Moisture_percent",               # Leaf water content
+  "Sheath_Moisture_percent",             # Sheath water content
+  "Nitrogen_percent",                    # Nitrogen %
+  "Phosphorus_percent",                  # Phosphorus %
+  "Potassium_percent",                   # Potassium %
+  "Yield_tonnes_ha_year_actual",         # Actual cane yield
+  "Cane_Moisture_percent_year_actual",           # Actual sugar content
+  "Real_T_canne",   
+  "T_Pol_canne",
+  "Age_weeks",
+  "Harvest_Age_year",                    # Age at harvest
+  "Agricultural_Surface_ha",             # Surface area actual
+  "Surface_Age_days"
+)
+
+# Check which variables actually exist in the dataset
+existing_factors <- intersect(factor_variables, names(leaf_data))
+existing_dates <- intersect(date_variables, names(leaf_data))
+existing_numerics <- intersect(numerical_variables, names(leaf_data))
+
+cat("FACTOR VARIABLES (", length(existing_factors), " found):\n")
+print(existing_factors)
+cat("\nDATE VARIABLES (", length(existing_dates), " found):\n")
+print(existing_dates)
+cat("\nNUMERICAL VARIABLES (", length(existing_numerics), " found):\n")
+print(existing_numerics)
+
+# Variables not classified
+all_classified <- c(existing_factors, existing_dates, existing_numerics)
+unclassified <- setdiff(names(leaf_data), all_classified)
+if(length(unclassified) > 0) {
+  cat("\nUNCLASSIFIED VARIABLES:\n")
+  print(unclassified)
+  
+  cat("\nSUGGESTED CLASSIFICATION FOR UNCLASSIFIED VARIABLES:\n")
+  for(var in unclassified) {
+    sample_values <- head(unique(leaf_data[[var]][!is.na(leaf_data[[var]]) & leaf_data[[var]] != ""]), 5)
+    cat("Variable:", var, "| Sample values:", paste(sample_values, collapse = ", "), "\n")
+    
+    non_empty <- leaf_data[[var]][!is.na(leaf_data[[var]]) & leaf_data[[var]] != ""]
+    if(length(non_empty) > 0) {
+      numeric_test <- gsub(",", ".", non_empty)
+      if(all(str_detect(numeric_test, "^-?[0-9]*\\.?[0-9]+$|^$"), na.rm = TRUE)) {
+        cat("  -> Suggested: NUMERIC\n")
+      } else if(length(unique(non_empty)) < 20 && length(non_empty) > 10) {
+        cat("  -> Suggested: FACTOR\n")
+      } else {
+        cat("  -> Suggested: CHARACTER/OTHER\n")
+      }
+    }
+  }
+}
+
+# ===============================
+# 3. CONVERT DATA TYPES
+# ===============================
+cat("\n3. DATA TYPE CONVERSION\n")
+cat("=======================\n")
+
+# Create a copy for conversion
+leaf_data_converted <- leaf_data
+
+# Convert factors
+for(var in existing_factors) {
+  if(var %in% names(leaf_data_converted)) {
+    leaf_data_converted[[var]] <- as.factor(leaf_data_converted[[var]])
+    cat("Converted", var, "to factor -", nlevels(leaf_data_converted[[var]]), "levels\n")
+  }
+}
+
+# Convert dates
+for(var in existing_dates) {
+  if(var %in% names(leaf_data_converted)) {
+    original_values <- leaf_data_converted[[var]]
+    
+    if(all(str_detect(original_values[!is.na(original_values) & original_values != ""], "^[0-9]+$"), na.rm = TRUE)) {
+      leaf_data_converted[[var]] <- as.Date(as.numeric(original_values), origin = "1899-12-30")
+      cat("Converted", var, "from Excel numeric format to Date\n")
+    } else {
+      date_converted <- as.Date(original_values, format = "%d/%m/%Y")
+      if(all(is.na(date_converted))) {
+        date_converted <- as.Date(original_values, format = "%Y-%m-%d")
+      }
+      if(all(is.na(date_converted))) {
+        date_converted <- as.Date(original_values, format = "%m/%d/%Y")
+      }
+      leaf_data_converted[[var]] <- date_converted
+      cat("Converted", var, "to Date format\n")
+    }
+    
+    valid_dates <- leaf_data_converted[[var]][!is.na(leaf_data_converted[[var]])]
+    if(length(valid_dates) > 0) {
+      date_range <- range(valid_dates)
+      cat("  Date range:", as.character(date_range[1]), "to", as.character(date_range[2]), "\n")
+    }
+  }
+}
+
+# Convert numerics
+for(var in existing_numerics) {
+  if(var %in% names(leaf_data_converted)) {
+    leaf_data_converted[[var]][leaf_data_converted[[var]] == "" | leaf_data_converted[[var]] == " "] <- NA
+    if(is.character(leaf_data_converted[[var]])) {
+      leaf_data_converted[[var]] <- gsub(",", ".", leaf_data_converted[[var]])
+    }
+    original_nas <- sum(is.na(leaf_data[[var]]))
+    leaf_data_converted[[var]] <- as.numeric(leaf_data_converted[[var]])
+    new_nas <- sum(is.na(leaf_data_converted[[var]]))
+    conversion_nas <- new_nas - original_nas
+    
+    if(conversion_nas > 0) {
+      cat("WARNING:", conversion_nas, "values became NA during conversion of", var, "\n")
+      problematic <- leaf_data[[var]][is.na(leaf_data_converted[[var]]) & !is.na(leaf_data[[var]])]
+      if(length(problematic) > 0) {
+        cat("  Examples of unconverted values:", paste(head(problematic, 3), collapse = ", "), "\n")
+      }
+    } else {
+      cat("Successfully converted", var, "to numeric\n")
+    }
+  }
+}
+
+str(leaf_data_converted)
+
+```
+
+## IV.3. Data Visualization by ggplot2
+
+```{r}
+# Load necessary packages
+library(pacman)
+p_load(
+  dplyr, readr, lubridate, tidyr, stringr, skimr,
+  VIM, summarytools, corrplot, janitor, purrr,
+  ggplot2, gridExtra, RColorBrewer, viridis, scales,
+  cowplot, ggthemes, Hmisc
+)
+
+# Set working directory and create output folder
+# setwd("your/working/directory")  # Uncomment and set your directory
+
+# Create folder for plots
+if (!dir.exists("Enhanced_Leaf_Boxplots_Publication")) {
+  dir.create("Enhanced_Leaf_Boxplots_Publication")
+}
+
+# Define enhanced color palettes for publication
+publication_colors <- list(
+  yield_colors = c("#006400", "#228B22", "#32CD32", "#7CFC00", "#98FB98", "#90EE90", "#F0FFF0", "#ADFF2F"),
+  nutrient_colors = c("#8B0000", "#B22222", "#DC143C", "#FF4500", "#FF6347", "#FFA500", "#FFD700", "#FFFF00"),
+  moisture_colors = c("#191970", "#4169E1", "#4682B4", "#5F9EA0", "#87CEEB", "#B0E0E6", "#E0F6FF", "#F0F8FF"),
+  physical_colors = c("#8B4513", "#A0522D", "#CD853F", "#D2B48C", "#F4A460", "#FFDAB9", "#FFE4B5", "#F5DEB3"),
+  age_colors = c("#800080", "#9932CC", "#9370DB", "#8A2BE2", "#7B68EE", "#6495ED", "#87CEEB", "#B0C4DE"),
+  general_colors = c("#2F4F4F", "#696969", "#808080", "#A9A9A9", "#C0C0C0", "#D3D3D3", "#DCDCDC", "#F5F5F5"),
+  comparison_colors = c("#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57", "#FF9FF3", "#54A0FF", "#5F27CD")
+)
+
+# Enhanced publication-ready theme with TIGHT layout and narrow boxplots
+publication_theme <- theme_minimal() +
+  theme(
+    text = element_text(size = 12, family = "Arial", color = "#1C1C1C"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5, color = "#000000", margin = margin(b = 8)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "#333333", margin = margin(b = 10)),
+    axis.title.x = element_text(size = 11, face = "bold", color = "#000000", margin = margin(t = 8)),
+    axis.title.y = element_text(size = 11, face = "bold", color = "#000000", margin = margin(r = 8)),
+    axis.text.x = element_text(size = 9, color = "#000000", angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 9, color = "#000000"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "#CCCCCC", size = 0.3, linetype = "solid"),
+    panel.background = element_rect(fill = "white", color = "#000000", size = 0.8),
+    plot.background = element_rect(fill = "white", color = "#000000", size = 1),
+    strip.text = element_text(size = 11, face = "bold", color = "#000000"),
+    plot.margin = margin(10, 10, 10, 10),  # Much tighter margins
+    panel.spacing = unit(0.4, "lines"),    # Tighter panel spacing
+    axis.line = element_line(color = "#000000", size = 0.6)
+  )
+
+# Function to detect outliers using IQR method
+detect_outliers <- function(x) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  lower_bound <- q1 - 1.5 * iqr
+  upper_bound <- q3 + 1.5 * iqr
+  return(x < lower_bound | x > upper_bound)
+}
+
+# Enhanced function to create narrow boxplots with red outlier detection
+create_enhanced_boxplot <- function(data_long, title, subtitle, colors, x_label, y_label, 
+                                  variable_col = "variable", value_col = "value", remove_outliers = FALSE) {
+  
+  # Detect outliers for each variable
+  data_with_outliers <- data_long %>%
+    group_by(!!sym(variable_col)) %>%
+    mutate(
+      is_outlier = detect_outliers(!!sym(value_col)),
+      outlier_label = ifelse(is_outlier, "Outlier", "Normal")
+    ) %>%
+    ungroup()
+  
+  # Remove outliers if requested
+  if (remove_outliers) {
+    plot_data <- data_with_outliers %>% filter(!is_outlier)
+    title <- paste(title, "(Without Outliers)")
+  } else {
+    plot_data <- data_with_outliers
+  }
+  
+  p <- ggplot(plot_data, aes_string(x = variable_col, y = value_col, fill = variable_col)) +
+    geom_boxplot(
+      alpha = 0.85, 
+      outlier.shape = NA,  # Hide default outliers
+      width = 0.18,  # EVEN TIGHTER boxplots
+      color = "#000000",  # Clear black contour
+      size = 0.6,  # Slightly thinner for tighter look
+      show.legend = FALSE
+    ) +
+    # Add red outlier points manually
+    {if (!remove_outliers) {
+      geom_point(
+        data = plot_data %>% filter(is_outlier),
+        aes_string(x = variable_col, y = value_col),
+        color = "#DC143C",  # Bright red for outliers
+        size = 1.2,  # Slightly smaller for tighter layout
+        alpha = 0.8,
+        shape = 16,
+        inherit.aes = FALSE
+      )
+    }} +
+    stat_summary(
+      fun = median, 
+      geom = "text", 
+      aes(label = sprintf("%.2f", after_stat(y))),
+      size = 2.5,  # Slightly smaller text for tighter layout
+      color = "white", 
+      fontface = "bold",
+      vjust = 0.5
+    ) +
+    scale_fill_manual(values = colors) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = y_label
+    ) +
+    publication_theme +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+    coord_cartesian(clip = "off")
+  
+  return(p)
+}
+
+# Assume leaf_data_converted is already available from your data processing
+# If not, you'll need to load and process your data first
+
+# THEMATIC GROUP 1: YIELD VARIABLES
+cat("Creating yield comparison boxplots...\n")
+
+# Yield comparison (current vs previous year)
+yield_comparison <- leaf_data_converted %>%
+  select(Yield_tonnes_ha_year_minus_1, Yield_tonnes_ha_year_actual) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable, 
+                          levels = c("Yield_tonnes_ha_year_minus_1", "Yield_tonnes_ha_year_actual"),
+                          labels = c("Previous Year Yield", "Current Year Yield")))
+
+p1_yield_comparison <- create_enhanced_boxplot(
+  yield_comparison, 
+  "Yield Comparison - Current vs Previous Year",
+  "Sugar cane yield comparison (tonnes/ha)",
+  publication_colors$yield_colors[1:2],
+  "Year", "Yield (tonnes/ha)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/01_Yield_Comparison.png", p1_yield_comparison,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p1_yield_comparison_no_outliers <- create_enhanced_boxplot(
+  yield_comparison, 
+  "Yield Comparison - Current vs Previous Year",
+  "Sugar cane yield comparison (tonnes/ha)",
+  publication_colors$yield_colors[1:2],
+  "Year", "Yield (tonnes/ha)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/01_Yield_Comparison_NoOutliers.png", p1_yield_comparison_no_outliers,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 2: MOISTURE CONTENT VARIABLES
+cat("Creating moisture content boxplots...\n")
+
+# Moisture content variables
+moisture_variables <- leaf_data_converted %>%
+  select(Leaf_Moisture_percent, Sheath_Moisture_percent, 
+         Cane_Moisture_percent_year_minus_1, Cane_Moisture_percent_year_actual) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Leaf_Moisture_percent", "Sheath_Moisture_percent", 
+                                   "Cane_Moisture_percent_year_minus_1", "Cane_Moisture_percent_year_actual"),
+                          labels = c("Leaf Moisture", "Sheath Moisture", "Cane Moisture (Prev)", "Cane Moisture (Curr)")))
+
+p2_moisture <- create_enhanced_boxplot(
+  moisture_variables,
+  "Plant Moisture Content",
+  "Moisture content in different plant parts (%)",
+  publication_colors$moisture_colors[1:4],
+  "Plant Part", "Moisture Content (%)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/02_Moisture_Content.png", p2_moisture,
+       width = 7, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p2_moisture_no_outliers <- create_enhanced_boxplot(
+  moisture_variables,
+  "Plant Moisture Content",
+  "Moisture content in different plant parts (%)",
+  publication_colors$moisture_colors[1:4],
+  "Plant Part", "Moisture Content (%)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/02_Moisture_Content_NoOutliers.png", p2_moisture_no_outliers,
+       width = 7, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 3: NUTRIENT CONTENT VARIABLES
+cat("Creating nutrient content boxplots...\n")
+
+# Nutrient content variables
+nutrient_variables <- leaf_data_converted %>%
+  select(Nitrogen_percent, Phosphorus_percent, Potassium_percent) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Nitrogen_percent", "Phosphorus_percent", "Potassium_percent"),
+                          labels = c("Nitrogen (N)", "Phosphorus (P)", "Potassium (K)")))
+
+p3_nutrients <- create_enhanced_boxplot(
+  nutrient_variables,
+  "Plant Nutrient Content",
+  "Essential nutrient content in plant tissue (%)",
+  publication_colors$nutrient_colors[1:3],
+  "Nutrient", "Content (%)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/03_Nutrient_Content.png", p3_nutrients,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p3_nutrients_no_outliers <- create_enhanced_boxplot(
+  nutrient_variables,
+  "Plant Nutrient Content",
+  "Essential nutrient content in plant tissue (%)",
+  publication_colors$nutrient_colors[1:3],
+  "Nutrient", "Content (%)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/03_Nutrient_Content_NoOutliers.png", p3_nutrients_no_outliers,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 4: AGE VARIABLES
+cat("Creating age-related boxplots...\n")
+
+# Age-related variables
+age_variables <- leaf_data_converted %>%
+  select(Sampling_Age, Age_weeks, Harvest_Age_year) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Sampling_Age", "Age_weeks", "Harvest_Age_year"),
+                          labels = c("Sampling Age", "Age (weeks)", "Harvest Age (years)")))
+
+p4_age <- create_enhanced_boxplot(
+  age_variables,
+  "Plant Age Variables",
+  "Different age measurements for sugar cane",
+  publication_colors$age_colors[1:3],
+  "Age Measurement", "Age Value"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/04_Age_Variables.png", p4_age,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 5: SURFACE AND PHYSICAL VARIABLES
+cat("Creating surface and physical variable boxplots...\n")
+
+# Surface and physical variables
+physical_variables <- leaf_data_converted %>%
+  select(Surface_ha, A_ce_jour, Agricultural_Surface_ha) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Surface_ha", "A_ce_jour", "Agricultural_Surface_ha"),
+                          labels = c("Surface (ha)", "A ce jour", "Agricultural Surface (ha)")))
+
+p5_physical <- create_enhanced_boxplot(
+  physical_variables,
+  "Surface and Physical Variables",
+  "Land area and physical measurements",
+  publication_colors$physical_colors[1:3],
+  "Physical Measurement", "Value"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/05_Physical_Variables.png", p5_physical,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 6: SUGAR CONTENT VARIABLES
+cat("Creating sugar content boxplots...\n")
+
+# Sugar content variables (if they exist in your data)
+if(all(c("Real_T_canne", "T_Pol_canne") %in% names(leaf_data_converted))) {
+  sugar_variables <- leaf_data_converted %>%
+    select(T_Pol_canne) %>%  # Excluding Real_T_canne as requested
+    pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+    filter(!is.na(value)) %>%
+    mutate(variable = factor(variable,
+                            levels = c("T_Pol_canne"),
+                            labels = c("T Pol Cane")))
+  
+  p6_sugar <- create_enhanced_boxplot(
+    sugar_variables,
+    "Sugar Content Variables",
+    "Sugar content measurements",
+    publication_colors$general_colors[1],
+    "Sugar Measurement", "Value"
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/06_Sugar_Content.png", p6_sugar,
+         width = 4, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+}
+
+# ENHANCED CORRELATION MATRIX
+cat("Creating enhanced correlation matrix...\n")
+
+# Select all numeric variables (excluding Real_T_canne and Surface_Age_days as requested)
+excluded_vars <- c("Real_T_canne", "Surface_Age_days")
+
+numeric_vars <- leaf_data_converted %>%
+  select_if(is.numeric) %>%
+  select(-any_of(excluded_vars))
+
+# Remove variables that are entirely NA or have insufficient data for correlation
+correlation_data <- numeric_vars %>%
+  select_if(~ sum(!is.na(.)) > 10)  # Keep variables with at least 10 non-NA values
+
+# Calculate correlation matrix with significance testing
+cor_result <- rcorr(as.matrix(correlation_data), type = "pearson")
+cor_matrix <- cor_result$r
+p_matrix <- cor_result$P
+
+# Handle any remaining NA/NaN/Inf values in correlation matrix
+cor_matrix[is.na(cor_matrix)] <- 0
+cor_matrix[is.infinite(cor_matrix)] <- 0
+
+# Create enhanced correlation plot with BIGGER and BOLD fonts
+png("Enhanced_Leaf_Boxplots_Publication/07_Enhanced_Correlation_Matrix.png", 
+    width = 18, height = 16, units = "in", res = 300, bg = "white")
+
+# Set up margins for title
+par(mar = c(2, 2, 6, 3))
+
+# Use standard blue to red color palette
+corr_colors <- colorRampPalette(c("#053061", "#2166AC", "#4393C3", "#92C5DE", 
+                                 "#D1E5F0", "#F7F7F7", 
+                                 "#FDDBC7", "#F4A582", "#D6604D", "#B2182B", "#67001F"))(100)
+
+# Create the correlation plot with BIGGER and BOLD text
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         order = "original",
+         col = corr_colors,
+         tl.col = "#000000",
+         tl.srt = 45,
+         tl.cex = 1.2,         # BIGGER variable names
+         tl.font = 2,          # BOLD variable names
+         cl.cex = 1.3,         # BIGGER color legend text
+         title = "Correlation Matrix of Leaf Dataset Variables\n(Excluding Real_T_canne and Surface_Age_days)",
+         mar = c(0,0,4,0),
+         diag = FALSE,
+         addCoef.col = "#000000",
+         number.cex = 0.7,     # BIGGER correlation values
+         number.digits = 2,
+         number.font = 2,      # BOLD correlation values
+         outline = TRUE,
+         cl.ratio = 0.2,
+         cl.align.text = "c",
+         cl.offset = 0.5)
+
+# Add BIGGER and BOLDER significance stars
+n_vars <- ncol(cor_matrix)
+for(i in 1:(n_vars-1)) {
+  for(j in (i+1):n_vars) {
+    if(!is.na(p_matrix[i,j])) {
+      if(p_matrix[i,j] < 0.001) {
+        sig_symbol <- "***"
+        sig_color <- "#000000"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else if(p_matrix[i,j] < 0.01) {
+        sig_symbol <- "**"
+        sig_color <- "#333333"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else if(p_matrix[i,j] < 0.05) {
+        sig_symbol <- "*"
+        sig_color <- "#666666"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else {
+        sig_symbol <- ""
+        sig_color <- "black"
+        sig_cex <- 1.0
+      }
+      
+      if(sig_symbol != "") {
+        x_center <- j
+        y_center <- n_vars - i + 1
+        text(x_center, y_center + 0.35, sig_symbol, 
+             cex = sig_cex, col = sig_color, font = 2)  # BOLD significance stars
+      }
+    }
+  }
+}
+
+# Enhanced legend with BIGGER text
+legend_x <- n_vars * 0.7
+legend_y <- n_vars * 0.9
+
+legend(x = legend_x, y = legend_y,
+       legend = c(
+         "Statistical Significance:",
+         "*** p < 0.001", 
+         "**  p < 0.01", 
+         "*   p < 0.05",
+         "",
+         "Correlation Strength:",
+         "Red: Strong Positive (r > 0.7)",
+         "Light Red: Moderate Positive (0.3 < r ≤ 0.7)", 
+         "White: Weak (-0.3 ≤ r ≤ 0.3)",
+         "Light Blue: Moderate Negative (-0.7 ≤ r < -0.3)",
+         "Blue: Strong Negative (r < -0.7)"
+       ), 
+       text.col = c("#000000", "#000000", "#333333", "#666666", "white",
+                   "#000000", "#B2182B", "#F4A582", "#000000", "#92C5DE", "#2166AC"), 
+       bty = "n", 
+       cex = 1.0,            # BIGGER legend text
+       text.font = 2,        # BOLD legend text
+       title = "Legend",
+       title.col = "#000000",
+       title.cex = 1.2,      # BIGGER legend title
+       title.font = 2)       # BOLD legend title
+
+dev.off()
+
+# YIELD COMPARISON ANALYSIS
+cat("Creating detailed yield comparison plots...\n")
+
+# Scatter plot comparing yields with trend line
+p_yield_scatter <- ggplot(leaf_data_converted, 
+                         aes(x = Yield_tonnes_ha_year_minus_1, y = Yield_tonnes_ha_year_actual)) +
+  geom_point(alpha = 0.7, size = 2, color = "#2F4F4F") +
+  geom_smooth(method = "lm", se = TRUE, color = "#DC143C", fill = "#FFB6C1", alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000", size = 1) +
+  labs(
+    title = "Yield Correlation: Current vs Previous Year",
+    subtitle = "Red line shows trend, black dashed line shows perfect correlation",
+    x = "Previous Year Yield (tonnes/ha)",
+    y = "Current Year Yield (tonnes/ha)"
+  ) +
+  publication_theme +
+  theme(legend.position = "none")
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/08_Yield_Correlation_Scatter.png", p_yield_scatter,
+       width = 7, height = 5, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Difference analysis
+yield_diff_data <- leaf_data_converted %>%
+  filter(!is.na(Yield_tonnes_ha_year_minus_1) & !is.na(Yield_tonnes_ha_year_actual)) %>%
+  mutate(
+    Yield_Difference = Yield_tonnes_ha_year_actual - Yield_tonnes_ha_year_minus_1,
+    Yield_Percent_Change = (Yield_Difference / Yield_tonnes_ha_year_minus_1) * 100,
+    Change_Category = case_when(
+      Yield_Percent_Change > 10 ~ "Strong Increase (>10%)",
+      Yield_Percent_Change > 0 ~ "Moderate Increase (0-10%)",
+      Yield_Percent_Change >= -10 ~ "Moderate Decrease (0 to -10%)",
+      TRUE ~ "Strong Decrease (<-10%)"
+    )
+  )
+
+# Yield difference histogram
+p_yield_diff <- ggplot(yield_diff_data, aes(x = Yield_Difference)) +
+  geom_histogram(bins = 30, fill = "#4ECDC4", color = "#000000", alpha = 0.8, size = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#DC143C", size = 1) +
+  geom_vline(xintercept = mean(yield_diff_data$Yield_Difference, na.rm = TRUE), 
+             color = "#2F4F4F", size = 1) +
+  labs(
+    title = "Distribution of Yield Changes",
+    subtitle = "Red line: no change, Dark line: mean change",
+    x = "Yield Change (tonnes/ha)",
+    y = "Frequency"
+  ) +
+  publication_theme
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/09_Yield_Difference_Distribution.png", p_yield_diff,
+       width = 7, height = 5, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Summary statistics
+cat("\n=== YIELD COMPARISON SUMMARY ===\n")
+summary_stats <- yield_diff_data %>%
+  summarise(
+    n_observations = n(),
+    mean_prev_yield = mean(Yield_tonnes_ha_year_minus_1, na.rm = TRUE),
+    mean_curr_yield = mean(Yield_tonnes_ha_year_actual, na.rm = TRUE),
+    mean_difference = mean(Yield_Difference, na.rm = TRUE),
+    mean_percent_change = mean(Yield_Percent_Change, na.rm = TRUE),
+    correlation = cor(Yield_tonnes_ha_year_minus_1, Yield_tonnes_ha_year_actual, use = "complete.obs")
+  )
+
+print(summary_stats)
+
+# Category distribution
+cat("\n=== YIELD CHANGE CATEGORIES ===\n")
+category_summary <- yield_diff_data %>%
+  count(Change_Category) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+print(category_summary)
+```
+
+```{r}
+
+
+# Create folder for plots
+if (!dir.exists("Enhanced_Leaf_Boxplots_Publication")) {
+  dir.create("Enhanced_Leaf_Boxplots_Publication")
+}
+
+# Define enhanced color palettes for publication with MORE colors
+publication_colors <- list(
+  yield_colors = c("#006400", "#228B22", "#32CD32", "#7CFC00", "#98FB98", "#90EE90", "#F0FFF0", "#ADFF2F", 
+                   "#9ACD32", "#6B8E23", "#556B2F", "#8FBC8F", "#20B2AA", "#008B8B", "#5F9EA0", "#4682B4"),
+  nutrient_colors = c("#8B0000", "#B22222", "#DC143C", "#FF4500", "#FF6347", "#FFA500", "#FFD700", "#FFFF00",
+                      "#FF1493", "#FF69B4", "#FFB6C1", "#FFA07A", "#FA8072", "#E9967A", "#CD5C5C", "#F08080"),
+  moisture_colors = c("#191970", "#4169E1", "#4682B4", "#5F9EA0", "#87CEEB", "#B0E0E6", "#E0F6FF", "#F0F8FF",
+                      "#00CED1", "#48D1CC", "#40E0D0", "#AFEEEE", "#B0E0E6", "#87CEFA", "#6495ED", "#4169E1"),
+  physical_colors = c("#8B4513", "#A0522D", "#CD853F", "#D2B48C", "#F4A460", "#FFDAB9", "#FFE4B5", "#F5DEB3",
+                      "#DEB887", "#BC8F8F", "#F5DEB3", "#FFEFD5", "#FFEBCD", "#FFDEAD", "#NAVAJOWHITE", "#MOCCASIN"),
+  age_colors = c("#800080", "#9932CC", "#9370DB", "#8A2BE2", "#7B68EE", "#6495ED", "#87CEEB", "#B0C4DE",
+                 "#DA70D6", "#EE82EE", "#DDA0DD", "#D8BFD8", "#THISTLE", "#PLUM", "#VIOLET", "#ORCHID"),
+  general_colors = c("#2F4F4F", "#696969", "#808080", "#A9A9A9", "#C0C0C0", "#D3D3D3", "#DCDCDC", "#F5F5F5",
+                     "#708090", "#778899", "#B0C4DE", "#E6E6FA", "#F8F8FF", "#F0F8FF", "#F5FFFA", "#HONEYDEW"),
+  comparison_colors = c("#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57", "#FF9FF3", "#54A0FF", "#5F27CD",
+                        "#FF7675", "#74B9FF", "#0984E3", "#00B894", "#FDCB6E", "#E17055", "#A29BFE", "#6C5CE7")
+)
+
+# Enhanced publication-ready theme with TIGHT layout and narrow boxplots
+publication_theme <- theme_minimal() +
+  theme(
+    text = element_text(size = 12, family = "Arial", color = "#1C1C1C"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5, color = "#000000", margin = margin(b = 8)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "#333333", margin = margin(b = 10)),
+    axis.title.x = element_text(size = 11, face = "bold", color = "#000000", margin = margin(t = 8)),
+    axis.title.y = element_text(size = 11, face = "bold", color = "#000000", margin = margin(r = 8)),
+    axis.text.x = element_text(size = 9, color = "#000000", angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 9, color = "#000000"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "#CCCCCC", size = 0.3, linetype = "solid"),
+    panel.background = element_rect(fill = "white", color = "#000000", size = 0.8),
+    plot.background = element_rect(fill = "white", color = "#000000", size = 1),
+    strip.text = element_text(size = 11, face = "bold", color = "#000000"),
+    plot.margin = margin(10, 10, 10, 10),  # Much tighter margins
+    panel.spacing = unit(0.4, "lines"),    # Tighter panel spacing
+    axis.line = element_line(color = "#000000", size = 0.6)
+  )
+
+# Function to detect outliers using IQR method
+detect_outliers <- function(x) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  lower_bound <- q1 - 1.5 * iqr
+  upper_bound <- q3 + 1.5 * iqr
+  return(x < lower_bound | x > upper_bound)
+}
+
+# Enhanced function to create narrow boxplots with red outlier detection
+create_enhanced_boxplot <- function(data_long, title, subtitle, colors, x_label, y_label, 
+                                  variable_col = "variable", value_col = "value", remove_outliers = FALSE) {
+  
+  # Detect outliers for each variable
+  data_with_outliers <- data_long %>%
+    group_by(!!sym(variable_col)) %>%
+    mutate(
+      is_outlier = detect_outliers(!!sym(value_col)),
+      outlier_label = ifelse(is_outlier, "Outlier", "Normal")
+    ) %>%
+    ungroup()
+  
+  # Remove outliers if requested
+  if (remove_outliers) {
+    plot_data <- data_with_outliers %>% filter(!is_outlier)
+    title <- paste(title, "(Without Outliers)")
+  } else {
+    plot_data <- data_with_outliers
+  }
+  
+  p <- ggplot(plot_data, aes_string(x = variable_col, y = value_col, fill = variable_col)) +
+    geom_boxplot(
+      alpha = 0.85, 
+      outlier.shape = NA,  # Hide default outliers
+      width = 0.18,  # EVEN TIGHTER boxplots
+      color = "#000000",  # Clear black contour
+      size = 0.6,  # Slightly thinner for tighter look
+      show.legend = FALSE
+    ) +
+    # Add red outlier points manually
+    {if (!remove_outliers) {
+      geom_point(
+        data = plot_data %>% filter(is_outlier),
+        aes_string(x = variable_col, y = value_col),
+        color = "#DC143C",  # Bright red for outliers
+        size = 1.2,  # Slightly smaller for tighter layout
+        alpha = 0.8,
+        shape = 16,
+        inherit.aes = FALSE
+      )
+    }} +
+    stat_summary(
+      fun = median, 
+      geom = "text", 
+      aes(label = sprintf("%.2f", after_stat(y))),
+      size = 2.5,  # Slightly smaller text for tighter layout
+      color = "white", 
+      fontface = "bold",
+      vjust = 0.5
+    ) +
+    scale_fill_manual(values = colors) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = x_label,
+      y = y_label
+    ) +
+    publication_theme +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+    coord_cartesian(clip = "off")
+  
+  return(p)
+}
+
+# Assume leaf_data_converted is already available from your data processing
+# If not, you'll need to load and process your data first
+
+# THEMATIC GROUP 1: YIELD VARIABLES
+cat("Creating yield comparison boxplots...\n")
+
+# Yield comparison (current vs previous year)
+yield_comparison <- leaf_data_converted %>%
+  select(Yield_tonnes_ha_year_minus_1, Yield_tonnes_ha_year_actual) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable, 
+                          levels = c("Yield_tonnes_ha_year_minus_1", "Yield_tonnes_ha_year_actual"),
+                          labels = c("Previous Year Yield", "Current Year Yield")))
+
+p1_yield_comparison <- create_enhanced_boxplot(
+  yield_comparison, 
+  "Yield Comparison - Current vs Previous Year",
+  "Sugar cane yield comparison (tonnes/ha)",
+  publication_colors$yield_colors[1:2],
+  "Year", "Yield (tonnes/ha)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/01_Yield_Comparison.png", p1_yield_comparison,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p1_yield_comparison_no_outliers <- create_enhanced_boxplot(
+  yield_comparison, 
+  "Yield Comparison - Current vs Previous Year",
+  "Sugar cane yield comparison (tonnes/ha)",
+  publication_colors$yield_colors[1:2],
+  "Year", "Yield (tonnes/ha)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/01_Yield_Comparison_NoOutliers.png", p1_yield_comparison_no_outliers,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 2: MOISTURE CONTENT VARIABLES
+cat("Creating moisture content boxplots...\n")
+
+# Moisture content variables
+moisture_variables <- leaf_data_converted %>%
+  select(Leaf_Moisture_percent, Sheath_Moisture_percent, 
+         Cane_Moisture_percent_year_minus_1, Cane_Moisture_percent_year_actual) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Leaf_Moisture_percent", "Sheath_Moisture_percent", 
+                                   "Cane_Moisture_percent_year_minus_1", "Cane_Moisture_percent_year_actual"),
+                          labels = c("Leaf Moisture", "Sheath Moisture", "Cane Moisture (Prev)", "Cane Moisture (Curr)")))
+
+p2_moisture <- create_enhanced_boxplot(
+  moisture_variables,
+  "Plant Moisture Content",
+  "Moisture content in different plant parts (%)",
+  publication_colors$moisture_colors[1:4],
+  "Plant Part", "Moisture Content (%)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/02_Moisture_Content.png", p2_moisture,
+       width = 7, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p2_moisture_no_outliers <- create_enhanced_boxplot(
+  moisture_variables,
+  "Plant Moisture Content",
+  "Moisture content in different plant parts (%)",
+  publication_colors$moisture_colors[1:4],
+  "Plant Part", "Moisture Content (%)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/02_Moisture_Content_NoOutliers.png", p2_moisture_no_outliers,
+       width = 7, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 3: NUTRIENT CONTENT VARIABLES
+cat("Creating nutrient content boxplots...\n")
+
+# Nutrient content variables
+nutrient_variables <- leaf_data_converted %>%
+  select(Nitrogen_percent, Phosphorus_percent, Potassium_percent) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Nitrogen_percent", "Phosphorus_percent", "Potassium_percent"),
+                          labels = c("Nitrogen (N)", "Phosphorus (P)", "Potassium (K)")))
+
+p3_nutrients <- create_enhanced_boxplot(
+  nutrient_variables,
+  "Plant Nutrient Content",
+  "Essential nutrient content in plant tissue (%)",
+  publication_colors$nutrient_colors[1:3],
+  "Nutrient", "Content (%)"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/03_Nutrient_Content.png", p3_nutrients,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Create version without outliers
+p3_nutrients_no_outliers <- create_enhanced_boxplot(
+  nutrient_variables,
+  "Plant Nutrient Content",
+  "Essential nutrient content in plant tissue (%)",
+  publication_colors$nutrient_colors[1:3],
+  "Nutrient", "Content (%)",
+  remove_outliers = TRUE
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/03_Nutrient_Content_NoOutliers.png", p3_nutrients_no_outliers,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 4: AGE VARIABLES
+cat("Creating age-related boxplots...\n")
+
+# Age-related variables
+age_variables <- leaf_data_converted %>%
+  select(Sampling_Age, Age_weeks, Harvest_Age_year) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Sampling_Age", "Age_weeks", "Harvest_Age_year"),
+                          labels = c("Sampling Age", "Age (weeks)", "Harvest Age (years)")))
+
+p4_age <- create_enhanced_boxplot(
+  age_variables,
+  "Plant Age Variables",
+  "Different age measurements for sugar cane",
+  publication_colors$age_colors[1:3],
+  "Age Measurement", "Age Value"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/04_Age_Variables.png", p4_age,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 5: SURFACE AND PHYSICAL VARIABLES
+cat("Creating surface and physical variable boxplots...\n")
+
+# Surface and physical variables
+physical_variables <- leaf_data_converted %>%
+  select(Surface_ha, A_ce_jour, Agricultural_Surface_ha) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable,
+                          levels = c("Surface_ha", "A_ce_jour", "Agricultural_Surface_ha"),
+                          labels = c("Surface (ha)", "A ce jour", "Agricultural Surface (ha)")))
+
+p5_physical <- create_enhanced_boxplot(
+  physical_variables,
+  "Surface and Physical Variables",
+  "Land area and physical measurements",
+  publication_colors$physical_colors[1:3],
+  "Physical Measurement", "Value"
+)
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/05_Physical_Variables.png", p5_physical,
+       width = 5, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+
+# THEMATIC GROUP 6: SUGAR CONTENT VARIABLES
+cat("Creating sugar content boxplots...\n")
+
+# Sugar content variables (if they exist in your data)
+if(all(c("Real_T_canne", "T_Pol_canne") %in% names(leaf_data_converted))) {
+  sugar_variables <- leaf_data_converted %>%
+    select(T_Pol_canne) %>%  # Excluding Real_T_canne as requested
+    pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+    filter(!is.na(value)) %>%
+    mutate(variable = factor(variable,
+                            levels = c("T_Pol_canne"),
+                            labels = c("T Pol Cane")))
+  
+  p6_sugar <- create_enhanced_boxplot(
+    sugar_variables,
+    "Sugar Content Variables",
+    "Sugar content measurements",
+    publication_colors$general_colors[1],
+    "Sugar Measurement", "Value"
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/06_Sugar_Content.png", p6_sugar,
+         width = 4, height = 4, dpi = 300, bg = "white")  # Tighter dimensions
+}
+
+# ENHANCED CORRELATION MATRIX
+cat("Creating enhanced correlation matrix...\n")
+
+# Select all numeric variables (excluding Real_T_canne and Surface_Age_days as requested)
+excluded_vars <- c("Real_T_canne", "Surface_Age_days")
+
+numeric_vars <- leaf_data_converted %>%
+  select_if(is.numeric) %>%
+  select(-any_of(excluded_vars))
+
+# Remove variables that are entirely NA or have insufficient data for correlation
+correlation_data <- numeric_vars %>%
+  select_if(~ sum(!is.na(.)) > 10)  # Keep variables with at least 10 non-NA values
+
+# Calculate correlation matrix with significance testing
+cor_result <- rcorr(as.matrix(correlation_data), type = "pearson")
+cor_matrix <- cor_result$r
+p_matrix <- cor_result$P
+
+# Handle any remaining NA/NaN/Inf values in correlation matrix
+cor_matrix[is.na(cor_matrix)] <- 0
+cor_matrix[is.infinite(cor_matrix)] <- 0
+
+# Create enhanced correlation plot with BIGGER and BOLD fonts
+png("Enhanced_Leaf_Boxplots_Publication/07_Enhanced_Correlation_Matrix.png", 
+    width = 16, height = 14, units = "in", res = 300, bg = "white")
+
+# Set up margins for title
+par(mar = c(2, 2, 6, 3))
+
+# Use standard blue to red color palette
+corr_colors <- colorRampPalette(c("#053061", "#2166AC", "#4393C3", "#92C5DE", 
+                                 "#D1E5F0", "#F7F7F7", 
+                                 "#FDDBC7", "#F4A582", "#D6604D", "#B2182B", "#67001F"))(100)
+
+# Create the correlation plot with BIGGER and BOLD text
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         order = "original",
+         col = corr_colors,
+         tl.col = "#000000",
+         tl.srt = 45,
+         tl.cex = 1.2,         # BIGGER variable names
+         tl.font = 2,          # BOLD variable names
+         cl.cex = 1.3,         # BIGGER color legend text
+         title = "Correlation Matrix of Leaf Dataset Variables\n(Excluding Real_T_canne and Surface_Age_days)",
+         mar = c(0,0,4,0),
+         diag = FALSE,
+         addCoef.col = "#000000",
+         number.cex = 0.7,     # BIGGER correlation values
+         number.digits = 2,
+         number.font = 2,      # BOLD correlation values
+         outline = TRUE,
+         cl.ratio = 0.2,
+         cl.align.text = "c",
+         cl.offset = 0.5)
+
+# Add BIGGER and BOLDER significance stars
+n_vars <- ncol(cor_matrix)
+for(i in 1:(n_vars-1)) {
+  for(j in (i+1):n_vars) {
+    if(!is.na(p_matrix[i,j])) {
+      if(p_matrix[i,j] < 0.001) {
+        sig_symbol <- "***"
+        sig_color <- "#000000"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else if(p_matrix[i,j] < 0.01) {
+        sig_symbol <- "**"
+        sig_color <- "#333333"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else if(p_matrix[i,j] < 0.05) {
+        sig_symbol <- "*"
+        sig_color <- "#666666"
+        sig_cex <- 1.0        # BIGGER significance stars
+      } else {
+        sig_symbol <- ""
+        sig_color <- "black"
+        sig_cex <- 1.0
+      }
+      
+      if(sig_symbol != "") {
+        x_center <- j
+        y_center <- n_vars - i + 1
+        text(x_center, y_center + 0.35, sig_symbol, 
+             cex = sig_cex, col = sig_color, font = 2)  # BOLD significance stars
+      }
+    }
+  }
+}
+
+# Enhanced legend with BIGGER text
+legend_x <- n_vars * 0.7
+legend_y <- n_vars * 0.9
+
+legend(
+  "bottomleft",
+  inset = c(0.12, 0.1), # nudges right and up from the very corner
+  legend = c(
+    "Statistical Significance:",
+    "*** p < 0.001", 
+    "**  p < 0.01", 
+    "*   p < 0.05",
+    "",
+    "Correlation Strength:",
+    "Red: Strong Positive (r > 0.7)",
+    "Light Red: Moderate Positive (0.3 < r ≤ 0.7)", 
+    "White: Weak (-0.3 ≤ r ≤ 0.3)",
+    "Light Blue: Moderate Negative (-0.7 ≤ r < -0.3)",
+    "Blue: Strong Negative (r < -0.7)"
+  ),
+  text.col = c("#000000", "#000000", "#333333", "#666666", "white",
+               "#000000", "#B2182B", "#F4A582", "#000000", "#92C5DE", "#2166AC"),
+  bty = "n",
+  cex = 1.0,
+  text.font = 2,
+  title = "Legend",
+  title.col = "#000000",
+  title.cex = 1.2,
+  title.font = 2
+)
+
+dev.off()
+
+# YIELD COMPARISON ANALYSIS
+cat("Creating detailed yield comparison plots...\n")
+
+# Scatter plot comparing yields with trend line
+p_yield_scatter <- ggplot(leaf_data_converted, 
+                         aes(x = Yield_tonnes_ha_year_minus_1, y = Yield_tonnes_ha_year_actual)) +
+  geom_point(alpha = 0.7, size = 2, color = "#2F4F4F") +
+  geom_smooth(method = "lm", se = TRUE, color = "#DC143C", fill = "#FFB6C1", alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000", size = 1) +
+  labs(
+    title = "Yield Correlation: Current vs Previous Year",
+    subtitle = "Red line shows trend, black dashed line shows perfect correlation",
+    x = "Previous Year Yield (tonnes/ha)",
+    y = "Current Year Yield (tonnes/ha)"
+  ) +
+  publication_theme +
+  theme(legend.position = "none")
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/08_Yield_Correlation_Scatter.png", p_yield_scatter,
+       width = 7, height = 5, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Difference analysis
+yield_diff_data <- leaf_data_converted %>%
+  filter(!is.na(Yield_tonnes_ha_year_minus_1) & !is.na(Yield_tonnes_ha_year_actual)) %>%
+  mutate(
+    Yield_Difference = Yield_tonnes_ha_year_actual - Yield_tonnes_ha_year_minus_1,
+    Yield_Percent_Change = (Yield_Difference / Yield_tonnes_ha_year_minus_1) * 100,
+    Change_Category = case_when(
+      Yield_Percent_Change > 10 ~ "Strong Increase (>10%)",
+      Yield_Percent_Change > 0 ~ "Moderate Increase (0-10%)",
+      Yield_Percent_Change >= -10 ~ "Moderate Decrease (0 to -10%)",
+      TRUE ~ "Strong Decrease (<-10%)"
+    )
+  )
+
+# Yield difference histogram
+p_yield_diff <- ggplot(yield_diff_data, aes(x = Yield_Difference)) +
+  geom_histogram(bins = 30, fill = "#4ECDC4", color = "#000000", alpha = 0.8, size = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#DC143C", size = 1) +
+  geom_vline(xintercept = mean(yield_diff_data$Yield_Difference, na.rm = TRUE), 
+             color = "#2F4F4F", size = 1) +
+  labs(
+    title = "Distribution of Yield Changes",
+    subtitle = "Red line: no change, Dark line: mean change",
+    x = "Yield Change (tonnes/ha)",
+    y = "Frequency"
+  ) +
+  publication_theme
+
+ggsave("Enhanced_Leaf_Boxplots_Publication/09_Yield_Difference_Distribution.png", p_yield_diff,
+       width = 7, height = 5, dpi = 300, bg = "white")  # Tighter dimensions
+
+# Summary statistics
+cat("\n=== YIELD COMPARISON SUMMARY ===\n")
+summary_stats <- yield_diff_data %>%
+  summarise(
+    n_observations = n(),
+    mean_prev_yield = mean(Yield_tonnes_ha_year_minus_1, na.rm = TRUE),
+    mean_curr_yield = mean(Yield_tonnes_ha_year_actual, na.rm = TRUE),
+    mean_difference = mean(Yield_Difference, na.rm = TRUE),
+    mean_percent_change = mean(Yield_Percent_Change, na.rm = TRUE),
+    correlation = cor(Yield_tonnes_ha_year_minus_1, Yield_tonnes_ha_year_actual, use = "complete.obs")
+  )
+
+print(summary_stats)
+
+# Category distribution
+cat("\n=== YIELD CHANGE CATEGORIES ===\n")
+category_summary <- yield_diff_data %>%
+  count(Change_Category) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+print(category_summary)
+print(category_summary)
+
+# ===================================================================
+# CATEGORICAL COMPARISONS - MEANINGFUL GROUPINGS
+# ===================================================================
+
+cat("\n=== CREATING CATEGORICAL COMPARISON PLOTS ===\n")
+
+# Enhanced theme for categorical comparisons with legend
+categorical_theme <- publication_theme +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9),
+    legend.margin = margin(t = 10),
+    axis.text.x = element_text(size = 9, color = "#000000", angle = 0, hjust = 0.5),  # No angle for categories
+    strip.text = element_text(size = 10, face = "bold", color = "#000000")
+  )
+
+# Function for categorical boxplots with AUTOMATIC color generation
+create_categorical_boxplot <- function(data, y_var, group_var, title, subtitle, y_label, group_label, colors = NULL) {
+  
+  # Filter out NA values
+  plot_data <- data %>%
+    filter(!is.na(!!sym(y_var)) & !is.na(!!sym(group_var)) & !!sym(group_var) != "")
+  
+  # Get unique groups and count them
+  unique_groups <- unique(plot_data[[group_var]])
+  n_groups <- length(unique_groups)
+  
+  # Create color palette automatically based on number of groups
+  if(is.null(colors) || length(colors) < n_groups) {
+    if(n_groups <= 16) {
+      # Use predefined colors for smaller groups
+      colors <- publication_colors$comparison_colors[1:n_groups]
+    } else {
+      # Generate colors automatically for larger groups
+      if(n_groups <= 30) {
+        # Use RColorBrewer for medium groups
+        colors <- RColorBrewer::brewer.pal(min(n_groups, 11), "Spectral")
+        if(n_groups > 11) {
+          colors <- colorRampPalette(colors)(n_groups)
+        }
+      } else {
+        # Use viridis for very large groups
+        colors <- viridis::viridis(n_groups, alpha = 0.8)
+      }
+    }
+  } else {
+    # Extend provided colors if needed
+    if(length(colors) < n_groups) {
+      colors <- colorRampPalette(colors)(n_groups)
+    }
+  }
+  
+  # Ensure we have exactly the right number of colors
+  colors <- colors[1:n_groups]
+  
+  cat("Creating plot for", n_groups, "groups in", group_var, "\n")
+  
+  p <- ggplot(plot_data, aes_string(x = group_var, y = y_var, fill = group_var)) +
+    geom_boxplot(
+      alpha = 0.85,
+      outlier.shape = NA,
+      width = 0.6,  # Wider for categorical comparisons
+      color = "#000000",
+      size = 0.6,
+      show.legend = ifelse(n_groups > 10, FALSE, TRUE)  # Hide legend if too many groups
+    ) +
+    geom_point(
+      position = position_jitter(width = 0.2, height = 0),
+      alpha = 0.4,
+      size = 0.8,
+      color = "#333333",
+      show.legend = FALSE
+    ) +
+    stat_summary(
+      fun = median,
+      geom = "text",
+      aes(label = sprintf("%.2f", after_stat(y))),
+      size = ifelse(n_groups > 15, 2.0, 2.5),  # Smaller text for many groups
+      color = "white",
+      fontface = "bold",
+      vjust = 0.5
+    ) +
+    scale_fill_manual(values = colors, name = group_label) +
+    labs(
+      title = title,
+      subtitle = paste(subtitle, "(", n_groups, "groups)"),
+      x = group_label,
+      y = y_label
+    ) +
+    categorical_theme +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+    theme(
+      axis.text.x = element_text(
+        angle = ifelse(n_groups > 8, 45, 0), 
+        hjust = ifelse(n_groups > 8, 1, 0.5),
+        size = ifelse(n_groups > 15, 7, 9)  # Smaller text for many groups
+      ),
+      legend.position = ifelse(n_groups > 10, "none", "bottom")
+    )
+  
+  return(p)
+}
+
+# 1. YIELD BY VARIETY
+cat("Creating yield by variety comparison...\n")
+
+if("Variety" %in% names(leaf_data_converted)) {
+  
+  # Current year yield by variety
+  p_yield_variety_current <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_actual",
+    "Variety",
+    "Current Year Yield by Variety",
+    "Sugar cane yield comparison across different varieties",
+    "Current Year Yield (tonnes/ha)",
+    "Variety"
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/10_Yield_by_Variety_Current.png", p_yield_variety_current,
+         width = 10, height = 6, dpi = 300, bg = "white")
+  
+  # Previous year yield by variety
+  p_yield_variety_previous <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_minus_1",
+    "Variety",
+    "Previous Year Yield by Variety",
+    "Sugar cane yield comparison across different varieties",
+    "Previous Year Yield (tonnes/ha)",
+    "Variety"
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/11_Yield_by_Variety_Previous.png", p_yield_variety_previous,
+         width = 10, height = 6, dpi = 300, bg = "white")
+}
+
+# 2. NUTRIENT CONTENT BY VARIETY
+cat("Creating nutrient content by variety comparison...\n")
+
+if("Variety" %in% names(leaf_data_converted)) {
+  
+  # Nitrogen by variety
+  p_nitrogen_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Nitrogen_percent",
+    "Variety",
+    "Nitrogen Content by Variety",
+    "Nitrogen content comparison across sugar cane varieties",
+    "Nitrogen Content (%)",
+    "Variety"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/12_Nitrogen_by_Variety.png", p_nitrogen_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+  
+  # Phosphorus by variety
+  p_phosphorus_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Phosphorus_percent",
+    "Variety",
+    "Phosphorus Content by Variety",
+    "Phosphorus content comparison across sugar cane varieties",
+    "Phosphorus Content (%)",
+    "Variety"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/13_Phosphorus_by_Variety.png", p_phosphorus_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+  
+  # Potassium by variety
+  p_potassium_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Potassium_percent",
+    "Variety",
+    "Potassium Content by Variety",
+    "Potassium content comparison across sugar cane varieties",
+    "Potassium Content (%)",
+    "Variety"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/14_Potassium_by_Variety.png", p_potassium_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+}
+
+# 3. MOISTURE CONTENT BY VARIETY
+cat("Creating moisture content by variety comparison...\n")
+
+if("Variety" %in% names(leaf_data_converted)) {
+  
+  # Leaf moisture by variety
+  p_leaf_moisture_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Leaf_Moisture_percent",
+    "Variety",
+    "Leaf Moisture Content by Variety",
+    "Leaf moisture content comparison across sugar cane varieties",
+    "Leaf Moisture Content (%)",
+    "Variety"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/15_Leaf_Moisture_by_Variety.png", p_leaf_moisture_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+  
+  # Sheath moisture by variety
+  p_sheath_moisture_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Sheath_Moisture_percent",
+    "Variety",
+    "Sheath Moisture Content by Variety",
+    "Sheath moisture content comparison across sugar cane varieties",
+    "Sheath Moisture Content (%)",
+    "Variety"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/16_Sheath_Moisture_by_Variety.png", p_sheath_moisture_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+}
+
+# 4. YIELD BY FARM
+cat("Creating yield by farm comparison...\n")
+
+if("Farm" %in% names(leaf_data_converted)) {
+  
+  # Current year yield by farm
+  p_yield_farm <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_actual",
+    "Farm",
+    "Current Year Yield by Farm",
+    "Sugar cane yield comparison across different farms",
+    "Current Year Yield (tonnes/ha)",
+    "Farm"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/17_Yield_by_Farm.png", p_yield_farm,
+         width = 12, height = 6, dpi = 300, bg = "white")
+}
+
+# 5. YIELD BY IRRIGATION TYPE
+cat("Creating yield by irrigation type comparison...\n")
+
+if("Irrigation_Type" %in% names(leaf_data_converted)) {
+  
+  # Current year yield by irrigation type
+  p_yield_irrigation <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_actual",
+    "Irrigation_Type",
+    "Current Year Yield by Irrigation Type",
+    "Sugar cane yield comparison across different irrigation methods",
+    "Current Year Yield (tonnes/ha)",
+    "Irrigation Type"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/18_Yield_by_Irrigation.png", p_yield_irrigation,
+         width = 8, height = 6, dpi = 300, bg = "white")
+  
+  # Nutrient content by irrigation type
+  nutrient_irrigation_data <- leaf_data_converted %>%
+    select(Irrigation_Type, Nitrogen_percent, Phosphorus_percent, Potassium_percent) %>%
+    filter(!is.na(Irrigation_Type) & Irrigation_Type != "") %>%
+    pivot_longer(cols = c(Nitrogen_percent, Phosphorus_percent, Potassium_percent),
+                 names_to = "Nutrient", values_to = "Content") %>%
+    filter(!is.na(Content)) %>%
+    mutate(Nutrient = factor(Nutrient,
+                            levels = c("Nitrogen_percent", "Phosphorus_percent", "Potassium_percent"),
+                            labels = c("Nitrogen (N)", "Phosphorus (P)", "Potassium (K)")))
+  
+  p_nutrients_irrigation <- ggplot(nutrient_irrigation_data, 
+                                  aes(x = Irrigation_Type, y = Content, fill = Nutrient)) +
+    geom_boxplot(alpha = 0.85, width = 0.6, color = "#000000", size = 0.6,
+                 position = position_dodge(width = 0.8)) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+               alpha = 0.4, size = 0.8, color = "#333333") +
+    scale_fill_manual(values = publication_colors$nutrient_colors[1:3], name = "Nutrient") +
+    labs(
+      title = "Nutrient Content by Irrigation Type",
+      subtitle = "NPK content comparison across irrigation methods",
+      x = "Irrigation Type",
+      y = "Nutrient Content (%)"
+    ) +
+    categorical_theme
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/19_Nutrients_by_Irrigation.png", p_nutrients_irrigation,
+         width = 10, height = 6, dpi = 300, bg = "white")
+}
+
+# 6. YIELD BY GROWTH PERIOD
+cat("Creating yield by growth period comparison...\n")
+
+if("Growth_Period" %in% names(leaf_data_converted)) {
+  
+  # Current year yield by growth period
+  p_yield_period <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_actual",
+    "Growth_Period",
+    "Current Year Yield by Growth Period",
+    "Sugar cane yield comparison across different growth periods",
+    "Current Year Yield (tonnes/ha)",
+    "Growth Period"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/20_Yield_by_Growth_Period.png", p_yield_period,
+         width = 8, height = 6, dpi = 300, bg = "white")
+}
+
+# 7. YIELD BY CROP CYCLE
+cat("Creating yield by crop cycle comparison...\n")
+
+if("Crop_Cycle" %in% names(leaf_data_converted)) {
+  
+  # Current year yield by crop cycle
+  p_yield_cycle <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Yield_tonnes_ha_year_actual",
+    "Crop_Cycle",
+    "Current Year Yield by Crop Cycle",
+    "Sugar cane yield comparison across different crop cycles",
+    "Current Year Yield (tonnes/ha)",
+    "Crop Cycle"  # Removed colors parameter to use automatic generation
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/21_Yield_by_Crop_Cycle.png", p_yield_cycle,
+         width = 8, height = 6, dpi = 300, bg = "white")
+}
+
+# 8. HARVEST AGE BY VARIETY
+cat("Creating harvest age by variety comparison...\n")
+
+if(all(c("Variety", "Harvest_Age_year") %in% names(leaf_data_converted))) {
+  
+  p_age_variety <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Harvest_Age_year",
+    "Variety",
+    "Harvest Age by Variety",
+    "Harvest age comparison across sugar cane varieties",
+    "Harvest Age (years)",
+    "Variety",
+    publication_colors$age_colors
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/22_Harvest_Age_by_Variety.png", p_age_variety,
+         width = 10, height = 6, dpi = 300, bg = "white")
+}
+
+# 9. SAMPLING AGE BY GROWTH PERIOD
+cat("Creating sampling age by growth period comparison...\n")
+
+if(all(c("Growth_Period", "Sampling_Age") %in% names(leaf_data_converted))) {
+  
+  p_sampling_age_period <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Sampling_Age",
+    "Growth_Period",
+    "Sampling Age by Growth Period",
+    "Sampling age comparison across different growth periods",
+    "Sampling Age",
+    "Growth Period",
+    publication_colors$age_colors
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/23_Sampling_Age_by_Period.png", p_sampling_age_period,
+         width = 8, height = 6, dpi = 300, bg = "white")
+}
+
+# 10. SURFACE AREA BY FARM
+cat("Creating surface area by farm comparison...\n")
+
+if(all(c("Farm", "Surface_ha") %in% names(leaf_data_converted))) {
+  
+  p_surface_farm <- create_categorical_boxplot(
+    leaf_data_converted,
+    "Surface_ha",
+    "Farm",
+    "Surface Area by Farm",
+    "Plot surface area comparison across different farms",
+    "Surface Area (ha)",
+    "Farm",
+    publication_colors$physical_colors
+  )
+  
+  ggsave("Enhanced_Leaf_Boxplots_Publication/24_Surface_by_Farm.png", p_surface_farm,
+         width = 12, height = 6, dpi = 300, bg = "white")
+}
+
+# 11. COMPREHENSIVE MULTI-FACETED ANALYSIS
+cat("Creating comprehensive multi-faceted analysis...\n")
+
+# Yield performance by variety and irrigation type (if both exist)
+if(all(c("Variety", "Irrigation_Type") %in% names(leaf_data_converted))) {
+  
+  multi_comparison_data <- leaf_data_converted %>%
+    filter(!is.na(Variety) & !is.na(Irrigation_Type) & 
+           !is.na(Yield_tonnes_ha_year_actual) &
+           Variety != "" & Irrigation_Type != "") %>%
+    select(Variety, Irrigation_Type, Yield_tonnes_ha_year_actual)
+  
+  if(nrow(multi_comparison_data) > 10) {  # Only if sufficient data
+    
+    p_multi_yield <- ggplot(multi_comparison_data, 
+                           aes(x = Variety, y = Yield_tonnes_ha_year_actual, fill = Irrigation_Type)) +
+      geom_boxplot(alpha = 0.85, width = 0.7, color = "#000000", size = 0.6,
+                   position = position_dodge(width = 0.8)) +
+      geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+                 alpha = 0.4, size = 0.8, color = "#333333") +
+      scale_fill_manual(values = publication_colors$comparison_colors, 
+                        name = "Irrigation Type") +
+      labs(
+        title = "Yield Performance: Variety × Irrigation Type Interaction",
+        subtitle = "Sugar cane yield comparison across varieties and irrigation methods",
+        x = "Variety",
+        y = "Current Year Yield (tonnes/ha)"
+      ) +
+      categorical_theme +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+    ggsave("Enhanced_Leaf_Boxplots_Publication/25_Yield_Variety_Irrigation_Interaction.png", p_multi_yield,
+           width = 14, height = 7, dpi = 300, bg = "white")
+  }
+}
+
+# 12. STATISTICAL SUMMARY TABLE FOR CATEGORICAL COMPARISONS
+cat("Creating statistical summary for categorical comparisons...\n")
+
+# Function to create statistical summary
+create_categorical_summary <- function(data, numeric_var, category_var) {
+  if(all(c(numeric_var, category_var) %in% names(data))) {
+    summary_table <- data %>%
+      filter(!is.na(!!sym(numeric_var)) & !is.na(!!sym(category_var)) & !!sym(category_var) != "") %>%
+      group_by(!!sym(category_var)) %>%
+      summarise(
+        n = n(),
+        mean = round(mean(!!sym(numeric_var), na.rm = TRUE), 3),
+        median = round(median(!!sym(numeric_var), na.rm = TRUE), 3),
+        sd = round(sd(!!sym(numeric_var), na.rm = TRUE), 3),
+        min = round(min(!!sym(numeric_var), na.rm = TRUE), 3),
+        max = round(max(!!sym(numeric_var), na.rm = TRUE), 3),
+        .groups = 'drop'
+      ) %>%
+      arrange(desc(mean))
+    
+    cat(paste("\n=== SUMMARY:", numeric_var, "BY", category_var, "===\n"))
+    print(summary_table)
+    return(summary_table)
+  }
+}
+
+# Generate summaries for key comparisons
+if("Variety" %in% names(leaf_data_converted)) {
+  create_categorical_summary(leaf_data_converted, "Yield_tonnes_ha_year_actual", "Variety")
+  create_categorical_summary(leaf_data_converted, "Nitrogen_percent", "Variety")
+  create_categorical_summary(leaf_data_converted, "Leaf_Moisture_percent", "Variety")
+}
+
+if("Farm" %in% names(leaf_data_converted)) {
+  create_categorical_summary(leaf_data_converted, "Yield_tonnes_ha_year_actual", "Farm")
+}
+
+if("Irrigation_Type" %in% names(leaf_data_converted)) {
+  create_categorical_summary(leaf_data_converted, "Yield_tonnes_ha_year_actual", "Irrigation_Type")
+}
+```
+
+# V. Multivariate Data Analysis - PCA
+
+```{r}
+# Multivariate Data Analysis for Sugar Cane Leaf Dataset using explor package
+# Load required libraries
+library(explor)
+library(FactoMineR)
+library(factoextra)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(DT)
+library(RColorBrewer)
+
+cat("================================================================\n")
+cat("MULTIVARIATE DATA ANALYSIS - SUGAR CANE LEAF DATASET\n")
+cat("================================================================\n")
+
+# Prepare the data for multivariate analysis
+cat("Preparing leaf data for multivariate analysis...\n")
+
+cat("• Total rows in leaf_data_converted:", nrow(leaf_data_converted), "\n")
+cat("• Total columns:", ncol(leaf_data_converted), "\n")
+cat("• Column names:", paste(names(leaf_data_converted)[1:min(10, ncol(leaf_data_converted))], collapse = ", "), "...\n\n")
+
+# Get all numeric variables, excluding ID-like variables and previously excluded ones
+excluded_vars <- c("Real_T_canne", "Surface_Age_days", "Plot", "Campaign", 
+                   "Farm", "Variety", "Crop_Cycle", "Growth_Period",
+                   "Irrigation_Type", "Harvest_Month", "Sampling_Month", 
+                   "Week_Number", "Data_Day", "Period_Validation", 
+                   "Plot_Campaign", "Harvest_Validation", "Note")
+
+numeric_vars <- leaf_data_converted %>%
+  select_if(is.numeric) %>%
+  select(-any_of(excluded_vars)) %>%
+  names()
+
+cat("Identified numeric variables:", length(numeric_vars), "\n")
+if(length(numeric_vars) > 0) {
+  cat("Variables for PCA:\n")
+  for(i in 1:length(numeric_vars)) {
+    cat("  ", i, ". ", numeric_vars[i], "\n")
+  }
+} else {
+  cat("ERROR: No numeric variables found!\n")
+  stop("Please check your data structure")
+}
+
+# Check for missing values in each variable
+missing_summary <- leaf_data_converted %>%
+  select(all_of(numeric_vars)) %>%
+  summarise_all(~sum(is.na(.))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_count") %>%
+  mutate(missing_percent = round(missing_count / nrow(leaf_data_converted) * 100, 2)) %>%
+  arrange(desc(missing_count))
+
+cat("\nMissing values summary:\n")
+print(missing_summary)
+
+# Remove variables with too many missing values (>70% for leaf data)
+vars_to_keep <- missing_summary %>%
+  filter(missing_percent <= 70) %>%
+  pull(variable)
+
+cat("\nKeeping", length(vars_to_keep), "variables with ≤70% missing values\n")
+cat("Variables kept:", paste(vars_to_keep, collapse = ", "), "\n")
+
+# Variables removed due to high missingness
+vars_removed <- missing_summary %>%
+  filter(missing_percent > 70) %>%
+  pull(variable)
+
+if(length(vars_removed) > 0) {
+  cat("Variables removed due to >70% missing:", paste(vars_removed, collapse = ", "), "\n")
+}
+
+# Create analysis dataset with categorical info for supplementary analysis
+categorical_vars <- c("Campaign", "Farm", "Variety", "Crop_Cycle", "Growth_Period", "Irrigation_Type")
+existing_categorical <- intersect(categorical_vars, names(leaf_data_converted))
+
+analysis_data <- leaf_data_converted %>%
+  select(all_of(vars_to_keep), any_of(existing_categorical))
+
+# Remove rows with too many missing values (>50% of numeric variables)
+numeric_data_for_filtering <- analysis_data %>% select(all_of(vars_to_keep))
+rows_to_keep <- rowSums(is.na(numeric_data_for_filtering)) <= length(vars_to_keep) * 0.5
+
+analysis_data <- analysis_data[rows_to_keep, ]
+
+cat("\nAfter filtering:\n")
+cat("• Numeric variables:", length(vars_to_keep), "\n")
+cat("• Categorical variables:", length(existing_categorical), "\n")
+cat("• Observations:", nrow(analysis_data), "\n\n")
+
+if(nrow(analysis_data) == 0) {
+  stop("ERROR: No observations left after filtering!")
+}
+
+# Extract numeric data for PCA and handle remaining missing values
+pca_data <- analysis_data %>%
+  select(all_of(vars_to_keep))
+
+# Replace remaining missing values with column medians (more robust for agricultural data)
+pca_data <- pca_data %>%
+  mutate_all(~ifelse(is.na(.), median(., na.rm = TRUE), .))
+
+# Check for and remove variables with zero variance
+var_check <- apply(pca_data, 2, function(x) {
+  if(all(is.na(x))) {
+    return(NA)
+  } else {
+    return(var(x, na.rm = TRUE))
+  }
+})
+
+# Identify problematic columns
+zero_var_cols <- names(var_check)[var_check == 0 | is.na(var_check) | is.infinite(var_check)]
+
+if(length(zero_var_cols) > 0) {
+  cat("Removing", length(zero_var_cols), "variables with zero/NA/infinite variance:\n")
+  cat(paste(zero_var_cols, collapse = ", "), "\n\n")
+  pca_data <- pca_data %>% select(-all_of(zero_var_cols))
+  vars_to_keep <- setdiff(vars_to_keep, zero_var_cols)
+} else {
+  cat("All variables have valid variance.\n\n")
+}
+
+# Scale the data (important for PCA when variables have different units)
+pca_data_scaled <- scale(pca_data)
+
+# Add meaningful rownames
+if("Campaign" %in% names(analysis_data) && "Plot" %in% names(leaf_data_converted)) {
+  rownames(pca_data_scaled) <- paste0("Obs_", 1:nrow(pca_data_scaled))
+} else {
+  rownames(pca_data_scaled) <- paste0("Sample_", 1:nrow(pca_data_scaled))
+}
+
+# Update final variables
+numeric_vars_final <- vars_to_keep
+
+cat("Final dataset for PCA:\n")
+cat("• Variables:", ncol(pca_data_scaled), "\n")
+cat("• Observations:", nrow(pca_data_scaled), "\n")
+cat("• Final variables:", paste(numeric_vars_final, collapse = ", "), "\n\n")
+
+# Create output directory
+if(!dir.exists("Enhanced_Leaf_PCA_Analysis")) {
+  dir.create("Enhanced_Leaf_PCA_Analysis", recursive = TRUE)
+}
+
+cat("================================================================\n")
+cat("1. PRINCIPAL COMPONENT ANALYSIS (PCA)\n")
+cat("================================================================\n")
+
+# Perform PCA using FactoMineR
+# Include supplementary categorical variables if available
+if(length(existing_categorical) > 0) {
+  # Prepare supplementary qualitative variables
+  sup_data <- analysis_data %>% 
+    select(all_of(existing_categorical)) %>%
+    mutate_all(as.factor)
+  
+  # Remove rows with all NA in supplementary variables
+  sup_data[is.na(sup_data)] <- "Unknown"
+  
+  # Find columns in supplementary data
+  sup_quali <- which(names(analysis_data) %in% existing_categorical)
+  
+  cat("Including supplementary categorical variables:", paste(existing_categorical, collapse = ", "), "\n")
+  
+  pca_result <- PCA(
+    cbind(pca_data_scaled, sup_data), 
+    scale.unit = FALSE,  # Already scaled
+    quali.sup = sup_quali,  # Supplementary qualitative variables
+    graph = FALSE,       # Don't show default plots
+    ncp = min(10, ncol(pca_data_scaled))  # Max 10 components
+  )
+} else {
+  cat("No supplementary categorical variables found\n")
+  pca_result <- PCA(pca_data_scaled, 
+                    scale.unit = FALSE,
+                    graph = FALSE,
+                    ncp = min(10, ncol(pca_data_scaled)))
+}
+
+cat("================================================================\n")
+cat("2. INTERACTIVE PCA EXPLORATION\n")
+cat("================================================================\n")
+
+# Note: This will open an interactive Shiny app
+# Uncomment the line below to launch the interactive explorer
+explor(pca_result)
+
+cat("================================================================\n")
+cat("3. CORRELATION ANALYSIS\n")
+cat("================================================================\n")
+
+# Create correlation matrix
+cor_matrix <- cor(pca_data, use = "complete.obs")
+
+# Enhanced correlation plot
+png("Enhanced_Leaf_PCA_Analysis/correlation_matrix.png", 
+    width = 14, height = 12, units = "in", res = 300, bg = "white")
+
+par(mar = c(2, 2, 4, 2))
+corrplot(cor_matrix, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         tl.col = "#000000",
+         tl.srt = 45,
+         tl.cex = 1.0,
+         tl.font = 2,
+         cl.cex = 1.1,
+         col = colorRampPalette(c("#053061", "#2166AC", "#4393C3", "#92C5DE", 
+                                 "#D1E5F0", "#F7F7F7", 
+                                 "#FDDBC7", "#F4A582", "#D6604D", "#B2182B", "#67001F"))(100),
+         title = "Sugar Cane Leaf Dataset - Correlation Matrix\n",
+         mar = c(0,0,3,0),
+         diag = FALSE,
+         addCoef.col = "#000000",
+         number.cex = 0.6,
+         number.digits = 2,
+         outline = TRUE)
+
+dev.off()
+
+cat("Correlation matrix saved as correlation_matrix.png\n\n")
+
+cat("================================================================\n")
+cat("4. PCA SUMMARY STATISTICS\n")
+cat("================================================================\n")
+
+# Print PCA summary
+cat("Eigenvalues and variance explained:\n")
+eigen_summary <- round(pca_result$eig, 3)
+print(eigen_summary)
+
+# Calculate how many components explain 80% of variance
+cum_var <- pca_result$eig[,3]
+components_80 <- which(cum_var >= 80)[1]
+cat("\nComponents needed to explain 80% variance:", components_80, "\n")
+
+cat("\nVariables with highest contributions to PC1:\n")
+contrib_pc1 <- sort(pca_result$var$contrib[,1], decreasing = TRUE)[1:min(10, nrow(pca_result$var$contrib))]
+print(round(contrib_pc1, 2))
+
+cat("\nVariables with highest contributions to PC2:\n")
+contrib_pc2 <- sort(pca_result$var$contrib[,2], decreasing = TRUE)[1:min(10, nrow(pca_result$var$contrib))]
+print(round(contrib_pc2, 2))
+
+cat("\nVariables with highest quality of representation (Cos2) on PC1-PC2:\n")
+cos2_pc12 <- pca_result$var$cos2[,1] + pca_result$var$cos2[,2]
+best_represented <- sort(cos2_pc12, decreasing = TRUE)[1:min(10, length(cos2_pc12))]
+print(round(best_represented, 3))
+
+cat("================================================================\n")
+cat("5. DETAILED PCA VISUALIZATIONS\n")
+cat("================================================================\n")
+
+# 1. Enhanced scree plot
+scree_plot <- fviz_eig(pca_result, 
+                       addlabels = TRUE, 
+                       ylim = c(0, max(pca_result$eig[,2]) * 1.1),
+                       barfill = "#4ECDC4",
+                       barcolor = "#2F4F4F",
+                       linecolor = "#DC143C") +
+  ggtitle("PCA Scree Plot - Sugar Cane Leaf Dataset") +
+  labs(subtitle = paste("First", components_80, "components explain 80% of variance")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 12))
+
+ggsave("Enhanced_Leaf_PCA_Analysis/pca_scree_plot.png", scree_plot,
+       width = 10, height = 6, dpi = 300, bg = "white")
+
+# 2. Enhanced biplot
+biplot <- fviz_pca_biplot(pca_result, 
+                         repel = TRUE,
+                         col.var = "#2E9FDF",
+                         col.ind = "#696969",
+                         alpha.ind = 0.3,
+                         alpha.var = 0.8,
+                         title = "PCA Biplot - Sugar Cane Leaf Variables and Observations",
+                         subtitle = paste("PC1 (", round(pca_result$eig[1,2], 1), "%) vs PC2 (", 
+                                        round(pca_result$eig[2,2], 1), "%)", sep="")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("Enhanced_Leaf_PCA_Analysis/pca_biplot.png", biplot,
+       width = 12, height = 9, dpi = 300, bg = "white")
+
+# 3. Variables contribution plot
+var_plot <- fviz_pca_var(pca_result,
+                        col.var = "contrib",
+                        gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                        repel = TRUE,
+                        title = "Variables Contribution to PC1-PC2",
+                        subtitle = "Color intensity = Contribution level") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("Enhanced_Leaf_PCA_Analysis/pca_variables_plot.png", var_plot,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+# 4. Variables quality plot (cos2)
+cos2_plot <- fviz_pca_var(pca_result,
+                         col.var = "cos2",
+                         gradient.cols = c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"),
+                         repel = TRUE,
+                         title = "Variables Quality of Representation (Cos2)",
+                         subtitle = "How well variables are represented by PC1-PC2") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("Enhanced_Leaf_PCA_Analysis/pca_variables_cos2_plot.png", cos2_plot,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+# 5. Individuals plot colored by contribution
+ind_plot <- fviz_pca_ind(pca_result,
+                        col.ind = "contrib",
+                        gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                        repel = FALSE,
+                        alpha.ind = 0.6,
+                        title = "Individuals Plot - Colored by Contribution",
+                        subtitle = "Each point represents one observation") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("Enhanced_Leaf_PCA_Analysis/pca_individuals_plot.png", ind_plot,
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+cat("================================================================\n")
+cat("6. SUPPLEMENTARY CATEGORICAL ANALYSIS\n")
+cat("================================================================\n")
+
+# Analyze supplementary categorical variables if available
+if(length(existing_categorical) > 0) {
+  for(cat_var in existing_categorical) {
+    if(cat_var %in% names(analysis_data)) {
+      cat("Analyzing", cat_var, "...\n")
+      
+      # Create plot colored by categorical variable
+      cat_levels <- unique(analysis_data[[cat_var]])
+      cat_levels <- cat_levels[!is.na(cat_levels) & cat_levels != ""]
+      
+      if(length(cat_levels) > 1 && length(cat_levels) <= 20) {
+        # Create color palette
+        if(length(cat_levels) <= 8) {
+          colors <- RColorBrewer::brewer.pal(max(3, length(cat_levels)), "Set2")[1:length(cat_levels)]
+        } else {
+          colors <- rainbow(length(cat_levels))
+        }
+        
+        # Plot individuals colored by categorical variable
+        tryCatch({
+          sup_plot <- fviz_pca_ind(pca_result,
+                                  habillage = cat_var,
+                                  palette = colors,
+                                  addEllipses = TRUE,
+                                  ellipse.level = 0.68,
+                                  repel = FALSE,
+                                  alpha.ind = 0.7,
+                                  title = paste("PCA - Individuals colored by", cat_var),
+                                  subtitle = paste("Ellipses show 68% confidence intervals")) +
+            theme_minimal() +
+            theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+                  plot.subtitle = element_text(hjust = 0.5, size = 11),
+                  legend.title = element_text(face = "bold"))
+          
+          filename <- paste0("Enhanced_Leaf_PCA_Analysis/pca_by_", tolower(cat_var), ".png")
+          ggsave(filename, sup_plot, width = 12, height = 8, dpi = 300, bg = "white")
+          
+          cat("  • Saved:", filename, "\n")
+        }, error = function(e) {
+          cat("  • Could not create plot for", cat_var, ":", e$message, "\n")
+        })
+      } else {
+        cat("  • Skipping", cat_var, "- too many levels or insufficient data\n")
+      }
+    }
+  }
+}
+
+cat("================================================================\n")
+cat("7. AGRICULTURAL INTERPRETATION ANALYSIS\n")
+cat("================================================================\n")
+
+# Group variables by agricultural meaning
+agricultural_groups <- list(
+  Yield = grep("yield|Yield", numeric_vars_final, value = TRUE, ignore.case = TRUE),
+  Moisture = grep("moisture|Moisture", numeric_vars_final, value = TRUE, ignore.case = TRUE),
+  Nutrients = grep("nitrogen|phosphorus|potassium|Nitrogen|Phosphorus|Potassium", numeric_vars_final, value = TRUE, ignore.case = TRUE),
+  Age = grep("age|Age|weeks|Weeks", numeric_vars_final, value = TRUE, ignore.case = TRUE),
+  Surface = grep("surface|Surface|ha", numeric_vars_final, value = TRUE, ignore.case = TRUE),
+  Sugar = grep("pol|sugar|Sugar|T_", numeric_vars_final, value = TRUE, ignore.case = TRUE)
+)
+
+# Remove empty groups
+agricultural_groups <- agricultural_groups[sapply(agricultural_groups, length) > 0]
+
+cat("Variable groups identified:\n")
+for(group_name in names(agricultural_groups)) {
+  cat("•", group_name, ":", length(agricultural_groups[[group_name]]), "variables\n")
+  cat("  Variables:", paste(agricultural_groups[[group_name]], collapse = ", "), "\n")
+}
+
+# Create contribution analysis by groups
+cat("\nContribution of variable groups to first 3 PCs:\n")
+for(i in 1:min(3, ncol(pca_result$var$contrib))) {
+  cat("\n--- PC", i, "(", round(pca_result$eig[i,2], 1), "% variance) ---\n")
+  
+  for(group_name in names(agricultural_groups)) {
+    group_vars <- agricultural_groups[[group_name]]
+    group_contrib <- sum(pca_result$var$contrib[group_vars, i], na.rm = TRUE)
+    cat(group_name, "group total contribution:", round(group_contrib, 2), "%\n")
+  }
+}
+
+cat("================================================================\n")
+cat("8. SAVE COMPREHENSIVE RESULTS\n")
+cat("================================================================\n")
+
+# Save all PCA results
+save(pca_result, pca_data, pca_data_scaled, cor_matrix, 
+     agricultural_groups, analysis_data, numeric_vars_final,
+     file = "Enhanced_Leaf_PCA_Analysis/leaf_pca_complete_results.RData")
+
+# Create comprehensive summary table
+n_components <- min(10, nrow(pca_result$eig))
+summary_table <- data.frame(
+  Component = paste0("PC", 1:n_components),
+  Eigenvalue = round(pca_result$eig[1:n_components, 1], 3),
+  Variance_Percent = round(pca_result$eig[1:n_components, 2], 2),
+  Cumulative_Percent = round(pca_result$eig[1:n_components, 3], 2)
+)
+
+write.csv(summary_table, "Enhanced_Leaf_PCA_Analysis/pca_summary.csv", row.names = FALSE)
+
+# Create variable contributions table
+contrib_table <- data.frame(
+  Variable = rownames(pca_result$var$contrib),
+  PC1_Contrib = round(pca_result$var$contrib[,1], 3),
+  PC2_Contrib = round(pca_result$var$contrib[,2], 3),
+  PC3_Contrib = round(pca_result$var$contrib[,3], 3),
+  PC1_Cos2 = round(pca_result$var$cos2[,1], 3),
+  PC2_Cos2 = round(pca_result$var$cos2[,2], 3),
+  PC3_Cos2 = round(pca_result$var$cos2[,3], 3)
+)
+
+write.csv(contrib_table, "Enhanced_Leaf_PCA_Analysis/variables_contributions.csv", row.names = FALSE)
+
+# Create coordinates table for individuals
+coord_table <- data.frame(
+  Sample = rownames(pca_result$ind$coord),
+  PC1 = round(pca_result$ind$coord[,1], 3),
+  PC2 = round(pca_result$ind$coord[,2], 3),
+  PC3 = round(pca_result$ind$coord[,3], 3)
+)
+
+# Add categorical information if available
+if(length(existing_categorical) > 0) {
+  for(cat_var in existing_categorical) {
+    if(cat_var %in% names(analysis_data)) {
+      coord_table[[cat_var]] <- analysis_data[[cat_var]]
+    }
+  }
+}
+
+write.csv(coord_table, "Enhanced_Leaf_PCA_Analysis/sample_coordinates.csv", row.names = FALSE)
+
+
+cat("explor(pca_result)\n\n")
+
+# Summary statistics
+cat("FINAL DATASET SUMMARY:\n")
+cat("• Original variables:", length(numeric_vars), "\n")
+cat("• Variables after filtering:", length(numeric_vars_final), "\n")
+cat("• Final observations:", nrow(pca_data_scaled), "\n")
+cat("• Categorical variables included:", length(existing_categorical), "\n")
+cat("• Components explaining 80% variance:", components_80, "\n")
+
+```
+
+```{r}
+# 3x3 PCA Variables Plot Grid 
+# Load required libraries
+library(FactoMineR)
+library(factoextra)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(dplyr)
+
+cat("================================================================\n")
+cat("3x3 PCA VARIABLES PLOT GRID - ALL VARIABLES VISIBLE\n")
+cat("SUGAR CANE LEAF DATASET - UNIFORM SIZING\n")
+cat("================================================================\n")
+
+# Check if PCA result exists
+if(!exists("pca_result")) {
+  stop("ERROR: pca_result not found. Please run the PCA analysis first!")
+}
+
+# Define sophisticated color palettes for agricultural data
+agricultural_colors <- c("#228B22", "#32CD32", "#FF6347", "#FFD700", "#87CEEB", "#DDA0DD", "#F4A460", "#98FB98", "#FF69B4")
+
+# Create custom theme for bold, professional plots with UNIFORM sizing
+theme_pca_agricultural <- function() {
+  theme_minimal() +
+  theme(
+    # UNIFORM TEXT SIZING FOR AGRICULTURAL DATA
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5, color = "#1B4332", margin = margin(b = 8)),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "#52796F", margin = margin(b = 6)),
+    axis.title = element_text(size = 10, face = "bold", color = "#2D6A4F"),
+    axis.text = element_text(size = 8.5, color = "#1B4332"),
+    
+    # UNIFORM LEGEND STYLING
+    legend.title = element_text(size = 9, face = "bold", color = "#1B4332", hjust = 0.5),
+    legend.text = element_text(size = 8, color = "#1B4332"),
+    legend.key.size = unit(0.45, "cm"),
+    legend.position = "right",
+    legend.box = "vertical",
+    legend.margin = margin(0, 0, 0, 8),
+    legend.box.margin = margin(0, 0, 0, 0),
+    
+    # AGRICULTURAL-THEMED GRID AND BACKGROUND
+    panel.grid.major = element_line(color = "#E8F5E8", size = 0.4, linetype = "dashed"),
+    panel.grid.minor = element_line(color = "#F0FFF0", size = 0.25, linetype = "dotted"),
+    panel.background = element_rect(fill = "#FEFFFE", color = NA),
+    plot.background = element_rect(fill = "#FFFFFF", color = NA),
+    
+    # UNIFORM LEGEND BACKGROUND
+    legend.background = element_rect(fill = "#F8FFF8", color = "#95D5B2", size = 0.4),
+    legend.key = element_rect(fill = "transparent", color = NA),
+    
+    # UNIFORM MARGINS
+    plot.margin = margin(10, 10, 10, 10),
+    
+    # STRIP TEXT FOR MULTI-PANEL CONSISTENCY
+    strip.text = element_text(face = "bold", size = 9, color = "#1B4332"),
+    
+    # ENSURE SQUARE ASPECT RATIO
+    aspect.ratio = 1
+  )
+}
+
+# Enhanced function to create PCA variable plot showing ALL variables
+create_agricultural_pca_plot <- function(pca_result, axes = c(1, 2), plot_title = "", 
+                                         color_type = "contrib") {
+  
+  # Check if axes exist
+  if (max(axes) > ncol(pca_result$var$coord)) {
+    return(create_placeholder_plot(plot_title, axes))
+  }
+  
+  # Variance explained for axis labels
+  var_exp_1 <- round(pca_result$eig[axes[1], 2], 1)
+  var_exp_2 <- round(pca_result$eig[axes[2], 2], 1)
+  
+  # --- CASE 1: Contribution ---
+  if (color_type == "contrib") {
+    p <- fviz_pca_var(pca_result,
+                      axes = axes,
+                      col.var = "contrib",
+                      alpha.var = 0.85,
+                      repel = TRUE,
+                      labelsize = 3.0,
+                      pointsize = 2.2,
+                      arrowsize = 0.7,
+                      select.var = list(contrib = Inf)) +  # Show ALL variables
+      scale_color_gradient2(low = "#2D6A4F", mid = "#F77F00", high = "#D62828",
+                            midpoint = 50, name = "Contrib\n%",
+                            guide = guide_colorbar(title.position = "top", 
+                                                   title.hjust = 0.5,
+                                                   barwidth = 1.3,
+                                                   barheight = 5.0,
+                                                   ticks.colour = "#1B4332",
+                                                   ticks.linewidth = 0.6,
+                                                   frame.colour = "#1B4332",
+                                                   frame.linewidth = 0.8)) +
+      labs(title = plot_title,
+           subtitle = paste0("PC", axes[1], " & PC", axes[2], " • All Variables"),
+           x = paste0("PC", axes[1], " (", var_exp_1, "% variance)"),
+           y = paste0("PC", axes[2], " (", var_exp_2, "% variance)"))
+    
+  # --- CASE 2: Cos² quality ---
+  } else if (color_type == "cos2") {
+    p <- fviz_pca_var(pca_result,
+                      axes = axes,
+                      col.var = "cos2",
+                      alpha.var = 0.85,
+                      repel = TRUE,
+                      labelsize = 3.0,
+                      pointsize = 2.2,
+                      arrowsize = 0.7,
+                      select.var = list(cos2 = 0)) +  # Show ALL variables
+      scale_color_viridis_c(option = "viridis", name = "Quality\n(Cos²)",
+                            guide = guide_colorbar(title.position = "top", 
+                                                   title.hjust = 0.5,
+                                                   barwidth = 1.3,
+                                                   barheight = 5.0,
+                                                   ticks.colour = "#1B4332",
+                                                   ticks.linewidth = 0.6,
+                                                   frame.colour = "#1B4332",
+                                                   frame.linewidth = 0.8)) +
+      labs(title = plot_title,
+           subtitle = paste0("PC", axes[1], " & PC", axes[2], " • All Variables"),
+           x = paste0("PC", axes[1], " (", var_exp_1, "% variance)"),
+           y = paste0("PC", axes[2], " (", var_exp_2, "% variance)"))
+  }
+  
+  # Apply agricultural theme
+  p <- p + theme_pca_agricultural()
+  
+  # Add reference lines, border, and fixed square ratio
+  p <- p +
+    geom_hline(yintercept = 0, linetype = "solid", color = "#52796F", size = 0.9, alpha = 0.8) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "#52796F", size = 0.9, alpha = 0.8) +
+    annotate("rect", xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, 
+             fill = NA, color = "#1B4332", size = 1.3) +
+    coord_fixed(ratio = 1,
+                xlim = c(-1.1, 1.1),
+                ylim = c(-1.1, 1.1),
+                expand = FALSE,
+                clip = "on")
+  
+  return(p)
+}
+
+# Function to create placeholder plot for missing dimensions
+create_placeholder_plot <- function(title, axes) {
+  ggplot() + 
+    annotate("text", x = 0, y = 0, 
+             label = paste("PC", max(axes), "\nnot available\nin dataset"), 
+             size = 5, color = "#52796F", fontface = "bold") +
+    annotate("text", x = 0, y = -0.3,
+             label = "Insufficient components\nfor this combination",
+             size = 3.5, color = "#7F8C8D") +
+    labs(title = title, 
+         subtitle = paste0("PC", axes[1], " & PC", axes[2], " • Not Available")) +
+    theme_pca_agricultural() +
+    theme(axis.text = element_blank(), 
+          axis.ticks = element_blank(),
+          panel.grid = element_blank()) +
+    coord_fixed(ratio = 1, xlim = c(-1, 1), ylim = c(-1, 1))
+}
+
+# Define the 9 different dimension combinations
+plot_combinations <- list(
+  list(axes = c(1, 2), title = "Primary Components", color = "contrib"),
+  list(axes = c(1, 3), title = "Main vs Third", color = "cos2"),
+  list(axes = c(2, 3), title = "Secondary vs Third", color = "contrib"),
+  list(axes = c(1, 4), title = "Primary Extended", color = "cos2"),
+  list(axes = c(2, 4), title = "Secondary Extended", color = "contrib"),
+  list(axes = c(3, 4), title = "Middle Components", color = "cos2"),
+  list(axes = c(1, 5), title = "Primary vs Fifth", color = "contrib"),
+  list(axes = c(2, 5), title = "Secondary vs Fifth", color = "cos2"),
+  list(axes = c(3, 5), title = "Tertiary vs Fifth", color = "contrib")
+)
+
+# Create individual plots showing ALL variables
+cat("Creating individual PCA variable plots showing ALL variables...\n")
+plot_list <- list()
+
+for(i in 1:9) {
+  combo <- plot_combinations[[i]]
+  
+  cat("Creating plot", i, ":", combo$title, "(", paste(combo$axes, collapse=" vs "), ") with", combo$color, "coloring...\n")
+  
+  plot_list[[i]] <- create_agricultural_pca_plot(pca_result, 
+                                               axes = combo$axes, 
+                                               plot_title = combo$title,
+                                               color_type = combo$color)
+}
+
+cat("All 9 plots created successfully!\n\n")
+
+# Create the 3x3 grid layout
+cat("Arranging plots in 3x3 grid...\n")
+
+# Create main title
+main_title <- ggdraw() + 
+  draw_label("Sugar Cane Leaf Dataset: PCA Variables Grid - All Variables Shown", 
+             fontface = 'bold', size = 18, color = "#1B4332") +
+  draw_label("Complete visualization of all variable loadings across multiple PC dimensions", 
+             fontface = 'plain', size = 12, color = "#52796F", 
+             x = 0.5, y = 0.25) +
+  draw_label("No variables filtered - all displayed in each plot", 
+             fontface = 'italic', size = 10, color = "#74A57F", 
+             x = 0.5, y = 0.05) +
+  theme(plot.background = element_rect(fill = "#FFFFFF", color = NA))
+
+# Arrange plots in 3x3 grid
+variables_grid <- plot_grid(
+  plot_list[[1]], plot_list[[2]], plot_list[[3]],
+  plot_list[[4]], plot_list[[5]], plot_list[[6]],
+  plot_list[[7]], plot_list[[8]], plot_list[[9]],
+  ncol = 3, nrow = 3,
+  align = "hv",
+  axis = "tblr",
+  rel_widths = c(1, 1, 1),
+  rel_heights = c(1, 1, 1),
+  hjust = 0.5,
+  vjust = 0.5,
+  scale = 0.96
+)
+
+# Combine title with grid
+final_plot <- plot_grid(
+  main_title, 
+  variables_grid,
+  ncol = 1,
+  rel_heights = c(0.08, 0.92),
+  align = "hv"
+)
+
+# Create output directory
+if(!dir.exists("PCA_Analysis_All_Variables")) {
+  dir.create("PCA_Analysis_All_Variables", recursive = TRUE)
+}
+
+# Save the comprehensive plot
+cat("Saving comprehensive 3x3 PCA variables grid (all variables)...\n")
+
+# High-resolution version
+ggsave("PCA_Analysis_All_Variables/pca_variables_3x3_grid_all_variables.png", 
+       final_plot,
+       width = 20, height = 20,
+       dpi = 300, 
+       bg = "white",
+       device = "png")
+
+# Medium resolution version
+ggsave("PCA_Analysis_All_Variables/pca_variables_3x3_grid_medium.png", 
+       final_plot,
+       width = 16, height = 16,
+       dpi = 200, 
+       bg = "white",
+       device = "png")
+
+
+# Print variable information
+if(exists("pca_result")) {
+  cat("VARIABLES INCLUDED IN ANALYSIS:\n")
+  var_names <- rownames(pca_result$var$coord)
+  for(i in 1:length(var_names)) {
+    cat(sprintf("%2d. %s\n", i, var_names[i]))
+  }
+  
+  cat("\nPCA DIMENSIONS AVAILABLE:", ncol(pca_result$var$coord), "\n")
+  cat("VARIANCE EXPLAINED BY FIRST 5 PCs:\n")
+  first_5 <- min(5, nrow(pca_result$eig))
+  for(i in 1:first_5) {
+    cat(sprintf("PC%d: %.1f%% (cumulative: %.1f%%)\n", 
+                i, pca_result$eig[i,2], pca_result$eig[i,3]))
+  }
+}
+
+
+```

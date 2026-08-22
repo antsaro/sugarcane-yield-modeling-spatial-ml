@@ -1,0 +1,1869 @@
+---
+title: "INLA Script"
+author: "Antsa Sarobidy"
+format: html
+editor: visual
+---
+
+# Scrip INLA
+
+## I. ILR Granulo + without transformation
+
+```{r}
+# ============================================================================
+# MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH TRAIN/VALIDATION SPLIT
+# Compositional treatment for granulometry fractions
+# ============================================================================
+
+library(sf)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(spdep)
+library(readr)
+library(purrr)
+library(tibble)
+
+cat("========================================\n")
+cat("  MULTI-VARIABLE SPATIO-TEMPORAL       \n")
+cat("  IMPUTATION WITH TRAIN/VAL SPLIT      \n")
+cat("========================================\n")
+
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET AND IDENTIFY SOIL VARIABLES
+# ============================================================================
+cat("📂 LOADING COMPLETE DATASET AND IDENTIFYING SOIL VARIABLES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_normalized_granulo.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stop("Dataset not available")
+}
+
+# Define compositional and non-compositional variables
+GRANULO_FRACTIONS <- c(
+  "Clay_percent",
+  "Fine_Silt_percent",
+  "Coarse_Silt_percent",
+  "Fine_Sand_percent",
+  "Coarse_Sand_percent"
+)
+
+NON_COMPOSITIONAL_VARIABLES <- c(
+  "pH",
+  "CN_Ratio", 
+  "Electrical_Conductivity_mmho_cm",
+  "Exchangeable_Calcium_meq_100g",
+  "Exchangeable_Magnesium_meq_100g", 
+  "Exchangeable_Sodium_meq_100g",
+  "Exchangeable_Potassium_meq_100g",
+  "Available_P2O5_mg_kg",
+  "Organic_Carbon_per_mille",
+  "Total_Nitrogen_per_mille",
+  "Total_Silt_percent",
+  "Total_Sand_percent", 
+  "Organic_Matter_percent",
+  "Sum_of_Exchangeable_Bases_meq_100g",
+  "CaO_g_100g",
+  "Mg_Ca_Ratio",
+  "Mg_K_Ratio",
+  "Compaction_Index"
+)
+
+cat("Compositional variables (granulometry):", length(GRANULO_FRACTIONS), "\n")
+cat("Non-compositional variables:", length(NON_COMPOSITIONAL_VARIABLES), "\n")
+
+for (i in seq_along(GRANULO_FRACTIONS)) {
+  var_name <- GRANULO_FRACTIONS[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              length(GRANULO_FRACTIONS) + i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+cat("\nDataset structure:\n")
+cat("• Total observations:", nrow(parcelles_complete), "\n")
+cat("• Unique parcels:", length(unique(parcelles_complete$Final_Cleaned_ID)), "\n")
+cat("• Year range:", min(parcelles_complete$Year, na.rm = TRUE), "-", max(parcelles_complete$Year, na.rm = TRUE), "\n")
+
+# Validate compositional data
+parcelles_complete <- parcelles_complete %>%
+  mutate(
+    has_complete_granulo = !is.na(Clay_percent) & 
+                          !is.na(Fine_Silt_percent) & 
+                          !is.na(Coarse_Silt_percent) & 
+                          !is.na(Fine_Sand_percent) & 
+                          !is.na(Coarse_Sand_percent),
+    granulo_sum = Clay_percent + Fine_Silt_percent + Coarse_Silt_percent + 
+                  Fine_Sand_percent + Coarse_Sand_percent
+  )
+
+complete_granulo <- sum(parcelles_complete$has_complete_granulo, na.rm = TRUE)
+cat("\n🔍 COMPOSITIONAL DATA VALIDATION:\n")
+cat("• Observations with complete granulometry:", complete_granulo, "\n")
+
+if(complete_granulo > 0) {
+  sum_stats <- parcelles_complete %>%
+    filter(has_complete_granulo) %>%
+    pull(granulo_sum) %>%
+    summary()
+  cat("• Sum range:", round(sum_stats[1], 2), "to", round(sum_stats[6], 2), "%\n")
+}
+
+# ============================================================================
+# STEP 2: PREPARE SHARED SPATIAL STRUCTURE
+# ============================================================================
+cat("\n🗺️ PREPARING SHARED SPATIAL STRUCTURE:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+unique_parcels_spatial <- parcelles_complete %>%
+  group_by(Final_Cleaned_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(Final_Cleaned_ID)
+
+cat("Unique parcels for spatial analysis:", nrow(unique_parcels_spatial), "\n")
+
+unique_parcels_spatial <- st_make_valid(unique_parcels_spatial)
+cat("Geometries validated\n")
+
+field_mapping <- data.frame(
+  Original_ID = unique_parcels_spatial$Final_Cleaned_ID,
+  Sequential_ID = 1:nrow(unique_parcels_spatial)
+)
+
+cat("Field mapping created: 1 to", nrow(field_mapping), "\n")
+
+unique_parcels_spatial <- unique_parcels_spatial %>%
+  left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+  arrange(Sequential_ID)
+
+# ============================================================================
+# STEP 3: CREATE SPATIAL WEIGHTS MATRIX W.P1
+# ============================================================================
+cat("\n🔗 CREATING SHARED SPATIAL WEIGHTS MATRIX:\n")
+cat("=", rep("=", 42), "\n", sep="")
+
+cat("Computing boundary-to-boundary distances (this may take time)...\n")
+
+boundaries <- st_boundary(unique_parcels_spatial)
+dist_matrix <- st_distance(boundaries, boundaries)
+dist_matrix <- units::drop_units(dist_matrix)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated:", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+
+DISTANCE_THRESHOLD <- 110
+cat("Using distance threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+W.P1_complete <- matrix(0, nrow = nrow(unique_parcels_spatial), ncol = nrow(unique_parcels_spatial))
+W.P1_complete[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+diag(W.P1_complete) <- 0
+rownames(W.P1_complete) <- colnames(W.P1_complete) <- 1:nrow(W.P1_complete)
+
+n_connections <- sum(W.P1_complete)
+avg_neighbors <- n_connections / nrow(unique_parcels_spatial)
+
+cat("✅ W.P1 matrix created:\n")
+cat("• Dimensions:", nrow(W.P1_complete), "x", ncol(W.P1_complete), "\n")
+cat("• Total connections:", n_connections, "\n")
+cat("• Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+
+# ============================================================================
+# STEP 4: PREPARE SHARED TEMPORAL STRUCTURE
+# ============================================================================
+years_unique <- sort(unique(parcelles_complete$Year))
+n_years <- length(years_unique)
+year_mapping <- data.frame(
+  Year = years_unique,
+  ID.Year = 1:n_years
+)
+
+cat("Years mapped:", min(years_unique), "to", max(years_unique), "(", n_years, "years)\n")
+
+# ============================================================================
+# ILR TRANSFORMATION FUNCTIONS
+# ============================================================================
+
+create_ilr_basis <- function(D) {
+  V <- matrix(0, nrow = D - 1, ncol = D)
+  for (i in 1:(D - 1)) {
+    V[i, 1:i] <- 1/i
+    V[i, i + 1] <- -1
+    V[i, ] <- V[i, ] * sqrt(i / (i + 1))
+  }
+  return(V)
+}
+
+ilr_transform <- function(composition_matrix) {
+  D <- ncol(composition_matrix)
+  V <- create_ilr_basis(D)
+  log_comp <- log(composition_matrix)
+  ilr_coords <- log_comp %*% t(V)
+  return(ilr_coords)
+}
+
+ilr_inverse <- function(ilr_matrix) {
+  D <- ncol(ilr_matrix) + 1
+  V <- create_ilr_basis(D)
+  log_comp <- ilr_matrix %*% V
+  composition <- exp(log_comp)
+  row_sums <- rowSums(composition)
+  composition <- composition / row_sums
+  return(composition)
+}
+
+# ============================================================================
+# STEP 5: DEFINE IMPUTATION FUNCTIONS
+# ============================================================================
+
+# Non-compositional imputation (same as before)
+impute_single_variable <- function(variable_name, parcelles_data, W_matrix, field_map, year_map, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING VARIABLE:", variable_name, "\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  var_values <- parcelles_data[[variable_name]]
+  n_total <- length(var_values)
+  n_available <- sum(!is.na(var_values))
+  n_missing <- n_total - n_available
+  pct_available <- round(n_available/n_total*100, 1)
+  
+  if (verbose) {
+    cat("Variable statistics:\n")
+    cat("• Total observations:", n_total, "\n")
+    cat("• Available (non-NA):", n_available, "(", pct_available, "%)\n")
+    cat("• Missing (NA):", n_missing, "(", round(n_missing/n_total*100, 1), "%)\n")
+    
+    if (n_available > 0) {
+      cat("• Min value:", round(min(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Max value:", round(max(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Mean value:", round(mean(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Std deviation:", round(sd(var_values, na.rm = TRUE), 3), "\n")
+    }
+  }
+  
+  if (n_available < 10) {
+    if (verbose) cat("❌ Insufficient data (< 10 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  observed_data <- parcelles_data %>% filter(!is.na(.data[[variable_name]]))
+  
+  set.seed(123)
+  unique_parcels_with_data <- observed_data %>%
+    st_drop_geometry() %>%
+    dplyr::select(Final_Cleaned_ID) %>%
+    distinct() %>%
+    mutate(split = sample(c("train", "val"), n(), replace = TRUE, prob = c(0.9, 0.1)))
+  
+  parcelles_data_split <- parcelles_data %>%
+    left_join(unique_parcels_with_data, by = "Final_Cleaned_ID") %>%
+    mutate(
+      data_split = case_when(
+        is.na(.data[[variable_name]]) ~ "predict",
+        split == "train" ~ "train",
+        split == "val" ~ "validation",
+        TRUE ~ "predict"
+      )
+    ) %>%
+    dplyr::select(-split)
+  
+  train_obs <- sum(parcelles_data_split$data_split == "train")
+  val_obs <- sum(parcelles_data_split$data_split == "validation")
+  pred_obs <- sum(parcelles_data_split$data_split == "predict")
+  
+  if (verbose) {
+    cat("Data split:\n")
+    cat("• Training:", train_obs, "\n")
+    cat("• Validation:", val_obs, "\n")
+    cat("• To predict:", pred_obs, "\n")
+  }
+  
+  df_inla <- parcelles_data_split %>%
+    st_drop_geometry() %>%
+    left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+    left_join(year_map, by = "Year") %>%
+    mutate(
+      Y = case_when(
+        data_split == "train" ~ .data[[variable_name]],
+        TRUE ~ NA_real_
+      ),
+      Y_true = .data[[variable_name]],
+      ID.Field = Sequential_ID,
+      ID.Year = as.integer(ID.Year),
+      Month = as.integer(ifelse(is.na(Month), 6, Month)),
+      Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+      Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+      irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+    ) %>%
+    filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+    arrange(ID.Field, ID.Year)
+  
+  if (max(df_inla$ID.Field) > nrow(W_matrix)) {
+    if (verbose) cat("❌ Spatial structure incompatible. Skipping variable.\n")
+    return(NULL)
+  }
+  
+  if (verbose) cat("🚀 Fitting spatio-temporal model...\n")
+  
+  start_time <- Sys.time()
+  
+  fit_result <- tryCatch({
+    prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+    
+    inla(
+      Y ~ 1 + Bloc + irrg_ty +
+        f(ID.Field, model = "besag", graph = W_matrix,
+          group = ID.Year, 
+          control.group = list(model = "ar1"),
+          hyper = list(prec = prec_prior),
+          constr = TRUE),
+      data = df_inla,
+      family = "gaussian",
+      control.predictor = list(compute = TRUE, link = 1),
+      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+      control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+      verbose = FALSE
+    )
+  }, error = function(e) {
+    if (verbose) cat("❌ Full model failed. Trying simpler model...\n")
+    
+    tryCatch({
+      inla(
+        Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE),
+        verbose = FALSE
+      )
+    }, error = function(e2) {
+      if (verbose) cat("❌ Simple model also failed:", e2$message, "\n")
+      return(NULL)
+    })
+  })
+  
+  end_time <- Sys.time()
+  fitting_time <- as.numeric(difftime(end_time, start_time, units = "mins"))
+  
+  if (is.null(fit_result) || is.null(fit_result$summary.fitted.values)) {
+    if (verbose) cat("❌ Model fitting failed completely\n")
+    return(NULL)
+  }
+  
+  if (verbose) {
+    cat("✅ Model successful! Fitting time:", round(fitting_time, 1), "minutes\n")
+    if (!is.null(fit_result$dic)) cat("DIC:", round(fit_result$dic$dic, 2), "\n")
+    if (!is.null(fit_result$waic)) cat("WAIC:", round(fit_result$waic$waic, 2), "\n")
+  }
+  
+  predictions <- fit_result$summary.fitted.values
+  
+  df_predicted <- df_inla %>%
+    mutate(
+      !!paste0(variable_name, "_predicted") := predictions$mean,
+      !!paste0(variable_name, "_predicted_sd") := predictions$sd,
+      !!paste0(variable_name, "_predicted_lower") := predictions$`0.025quant`,
+      !!paste0(variable_name, "_predicted_upper") := predictions$`0.975quant`,
+      !!paste0(variable_name, "_complete") := case_when(
+        data_split == "train" ~ Y,
+        TRUE ~ predictions$mean
+      ),
+      !!paste0(variable_name, "_prediction_type") := case_when(
+        data_split == "train" ~ "Training",
+        data_split == "validation" ~ "Validation", 
+        data_split == "predict" ~ "Predicted"
+      )
+    )
+  
+  validation_data <- df_predicted %>%
+    filter(data_split == "validation", !is.na(Y_true), !is.na(predictions$mean))
+  
+  metrics <- list(variable = variable_name)
+  
+  if (nrow(validation_data) > 5) {
+    pred_vals <- validation_data[[paste0(variable_name, "_predicted")]]
+    true_vals <- validation_data$Y_true
+    
+    ss_res <- sum((true_vals - pred_vals)^2)
+    ss_tot <- sum((true_vals - mean(true_vals))^2)
+    r_squared <- 1 - (ss_res / ss_tot)
+    
+    metrics$r_squared <- r_squared
+    metrics$correlation <- cor(true_vals, pred_vals)
+    metrics$rmse <- sqrt(mean((true_vals - pred_vals)^2))
+    metrics$mae <- mean(abs(true_vals - pred_vals))
+    metrics$mean_error <- mean(true_vals - pred_vals)
+    metrics$n_validation <- nrow(validation_data)
+    
+    in_interval <- sum(validation_data$Y_true >= validation_data[[paste0(variable_name, "_predicted_lower")]] & 
+                      validation_data$Y_true <= validation_data[[paste0(variable_name, "_predicted_upper")]])
+    metrics$coverage_prob <- in_interval / nrow(validation_data)
+    
+    if (verbose) {
+      cat("🎯 Validation Results:\n")
+      cat("• Validation obs:", metrics$n_validation, "\n")
+      cat("• R²:", round(metrics$r_squared, 4), "\n")
+      cat("• Correlation:", round(metrics$correlation, 4), "\n") 
+      cat("• RMSE:", round(metrics$rmse, 4), "\n")
+      cat("• MAE:", round(metrics$mae, 4), "\n")
+      cat("• Coverage:", round(metrics$coverage_prob * 100, 1), "%\n")
+    }
+  } else {
+    metrics$r_squared <- NA
+    metrics$correlation <- NA
+    metrics$rmse <- NA
+    metrics$mae <- NA
+    metrics$mean_error <- NA
+    metrics$n_validation <- nrow(validation_data)
+    metrics$coverage_prob <- NA
+    
+    if (verbose) cat("❌ Insufficient validation data for metrics\n")
+  }
+  
+  result <- list(
+    variable_name = variable_name,
+    model_fit = fit_result,
+    predictions = df_predicted,
+    metrics = metrics,
+    fitting_time = fitting_time,
+    n_total = n_total,
+    n_available = n_available,
+    n_missing = n_missing,
+    pct_available = pct_available
+  )
+  
+  return(result)
+}
+
+# Compositional imputation for granulometry
+impute_compositional_granulometry <- function(parcelles_data, W_matrix, field_map, year_map, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING COMPOSITIONAL GRANULOMETRY (ILR)\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  parcelles_data <- parcelles_data %>%
+    mutate(obs_id = row_number())
+  
+  sampled_obs <- parcelles_data %>%
+    filter(has_complete_granulo)
+  
+  unsampled_obs <- parcelles_data %>%
+    filter(!has_complete_granulo)
+  
+  n_sampled <- nrow(sampled_obs)
+  n_unsampled <- nrow(unsampled_obs)
+  
+  if (verbose) {
+    cat("• Sampled observations:", n_sampled, "\n")
+    cat("• Unsampled observations:", n_unsampled, "\n")
+  }
+  
+  if (n_sampled < 20) {
+    if (verbose) cat("❌ Insufficient sampled observations\n")
+    return(NULL)
+  }
+  
+  comp_matrix <- sampled_obs %>%
+    st_drop_geometry() %>%
+    dplyr::select(all_of(GRANULO_FRACTIONS)) %>%
+    as.matrix()
+  
+  comp_matrix[comp_matrix <= 0] <- 0.01
+  row_sums <- rowSums(comp_matrix)
+  comp_matrix <- comp_matrix / row_sums * 100
+  
+  ilr_coords <- ilr_transform(comp_matrix / 100)
+  colnames(ilr_coords) <- paste0("ILR_", 1:4)
+  
+  if (verbose) {
+    cat("✅ ILR transformation: 5 fractions -> 4 orthonormal coordinates\n")
+  }
+  
+  sampled_obs_ilr <- sampled_obs %>%
+    bind_cols(as.data.frame(ilr_coords))
+  
+  set.seed(123)
+  unique_sampled_parcels <- sampled_obs_ilr %>%
+    st_drop_geometry() %>%
+    dplyr::select(Final_Cleaned_ID) %>%
+    distinct() %>%
+    mutate(split = sample(c("train", "val"), n(), replace = TRUE, prob = c(0.85, 0.15)))
+  
+  cat("• Unique parcels in training:", sum(unique_sampled_parcels$split == "train"), "\n")
+  cat("• Unique parcels in validation:", sum(unique_sampled_parcels$split == "val"), "\n")
+  
+  sampled_obs_split <- sampled_obs_ilr %>%
+    left_join(unique_sampled_parcels, by = "Final_Cleaned_ID") %>%
+    mutate(data_split = ifelse(split == "train", "train", "validation"))
+  
+  all_obs_for_prediction <- bind_rows(
+    sampled_obs_split %>% mutate(obs_type = "sampled"),
+    unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+  )
+  
+  train_obs <- sum(sampled_obs_split$data_split == "train")
+  val_obs <- sum(sampled_obs_split$data_split == "validation")
+  
+  if (verbose) {
+    cat("• Training observations:", train_obs, "\n")
+    cat("• Validation observations:", val_obs, "\n")
+    cat("• To predict (unsampled):", n_unsampled, "\n")
+  }
+  
+  ilr_results <- list()
+  
+  for (i in 1:4) {
+    ilr_var <- paste0("ILR_", i)
+    
+    if (verbose) cat("\n  Fitting", ilr_var, "...\n")
+    
+    df_inla <- all_obs_for_prediction %>%
+      st_drop_geometry() %>%
+      left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+      left_join(year_map, by = "Year") %>%
+      mutate(
+        Y = case_when(
+          data_split == "train" ~ .data[[ilr_var]],
+          TRUE ~ NA_real_
+        ),
+        Y_true = .data[[ilr_var]],
+        ID.Field = Sequential_ID,
+        ID.Year = as.integer(ID.Year),
+        Month = as.integer(ifelse(is.na(Month), 6, Month)),
+        Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+        irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+      ) %>%
+      filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+      arrange(ID.Field, ID.Year)
+    
+    fit_result <- tryCatch({
+      prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+      
+      inla(
+        Y ~ 1 + Bloc + irrg_ty +
+          f(ID.Field, model = "besag", graph = W_matrix,
+            group = ID.Year, 
+            control.group = list(model = "ar1"),
+            hyper = list(prec = prec_prior),
+            constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE, waic = TRUE),
+        control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      tryCatch({
+        inla(
+          Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE),
+          verbose = FALSE
+        )
+      }, error = function(e2) NULL)
+    })
+    
+    if (!is.null(fit_result)) {
+      predictions <- fit_result$summary.fitted.values
+      
+      df_predicted <- df_inla %>%
+        mutate(
+          !!paste0(ilr_var, "_predicted") := predictions$mean,
+          !!paste0(ilr_var, "_predicted_sd") := predictions$sd
+        )
+      
+      val_data <- df_predicted %>%
+        filter(data_split == "validation", !is.na(Y_true))
+      
+      metrics <- list()
+      if (nrow(val_data) > 5) {
+        pred_vals <- val_data[[paste0(ilr_var, "_predicted")]]
+        true_vals <- val_data$Y_true
+        
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        metrics$r_squared <- 1 - (ss_res / ss_tot)
+        metrics$rmse <- sqrt(mean((true_vals - pred_vals)^2))
+        metrics$n_val <- nrow(val_data)
+      }
+      
+      ilr_results[[ilr_var]] <- list(
+        model = fit_result,
+        predictions = df_predicted,
+        metrics = metrics
+      )
+      
+      if (verbose && !is.null(metrics$r_squared)) {
+        cat("    ✅ R² (validation):", round(metrics$r_squared, 4), 
+            "| n =", metrics$n_val, "\n")
+      }
+    } else {
+      if (verbose) cat("    ❌ Failed\n")
+      return(NULL)
+    }
+  }
+  
+  if (verbose) cat("\n🔄 Transforming back to composition...\n")
+  
+  all_predictions <- ilr_results[[1]]$predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, data_split, obs_type,
+                  ILR_1_predicted, ILR_1_predicted_sd)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    pred_cols <- ilr_results[[ilr_var]]$predictions %>%
+      dplyr::select(obs_id, !!paste0(ilr_var, "_predicted"), !!paste0(ilr_var, "_predicted_sd"))
+    
+    all_predictions <- all_predictions %>%
+      left_join(pred_cols, by = "obs_id")
+  }
+  
+  ilr_pred_matrix <- all_predictions %>%
+    dplyr::select(ILR_1_predicted, ILR_2_predicted, ILR_3_predicted, ILR_4_predicted) %>%
+    as.matrix()
+  
+  comp_predicted <- ilr_inverse(ilr_pred_matrix)
+  comp_predicted_pct <- comp_predicted * 100
+  colnames(comp_predicted_pct) <- GRANULO_FRACTIONS
+  
+  if (verbose) {
+    cat("✅ ILR back-transformation complete\n")
+    sums_check <- rowSums(comp_predicted_pct)
+    cat("• Sum range:", round(min(sums_check), 2), "to", round(max(sums_check), 2), "%\n")
+  }
+  
+  final_results <- all_predictions %>%
+    bind_cols(as.data.frame(comp_predicted_pct) %>%
+                rename_with(~paste0(., "_predicted"), all_of(GRANULO_FRACTIONS)))
+  
+  for (frac in GRANULO_FRACTIONS) {
+    original_map <- all_obs_for_prediction %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(original_value = !!frac)
+    
+    final_results <- final_results %>%
+      left_join(original_map, by = "obs_id")
+    
+    pred_col <- paste0(frac, "_predicted")
+    
+    final_results[[paste0(frac, "_complete")]] <- ifelse(
+      final_results$data_split == "train",
+      final_results$original_value,
+      final_results[[pred_col]]
+    )
+    
+    final_results[[paste0(frac, "_prediction_type")]] <- final_results$data_split
+    
+    final_results <- final_results %>% dplyr::select(-original_value)
+  }
+  
+  overall_metrics <- list()
+  val_subset <- final_results %>% filter(data_split == "validation")
+  
+  if (nrow(val_subset) > 5) {
+    frac_metrics <- list()
+    
+    for (frac in GRANULO_FRACTIONS) {
+      true_map <- sampled_obs_split %>%
+        filter(data_split == "validation") %>%
+        st_drop_geometry() %>%
+        dplyr::select(obs_id, !!frac) %>%
+        rename(true_val = !!frac)
+      
+      val_comparison <- val_subset %>%
+        left_join(true_map, by = "obs_id")
+      
+      if (sum(!is.na(val_comparison$true_val)) > 5) {
+        true_vals <- val_comparison$true_val
+        pred_vals <- val_comparison[[paste0(frac, "_predicted")]]
+        
+        valid_idx <- !is.na(true_vals) & !is.na(pred_vals)
+        true_vals <- true_vals[valid_idx]
+        pred_vals <- pred_vals[valid_idx]
+        
+        if (length(true_vals) > 0) {
+          ss_res <- sum((true_vals - pred_vals)^2)
+          ss_tot <- sum((true_vals - mean(true_vals))^2)
+          
+          frac_metrics[[frac]] <- list(
+            r_squared = 1 - (ss_res / ss_tot),
+            rmse = sqrt(mean((true_vals - pred_vals)^2)),
+            mae = mean(abs(true_vals - pred_vals)),
+            n = length(true_vals)
+          )
+        }
+      }
+    }
+    
+    overall_metrics$fraction_metrics <- frac_metrics
+    overall_metrics$n_validation <- nrow(val_subset)
+    
+    if (verbose) {
+      cat("\n🎯 Validation Results (Back-transformed Fractions):\n")
+      cat("• Validation observations:", nrow(val_subset), "\n")
+      for (frac in GRANULO_FRACTIONS) {
+        if (!is.null(frac_metrics[[frac]])) {
+          cat("• ", frac, ": R²=", round(frac_metrics[[frac]]$r_squared, 4),
+              " RMSE=", round(frac_metrics[[frac]]$rmse, 2), "% (n=", 
+              frac_metrics[[frac]]$n, ")\n", sep="")
+        }
+      }
+    }
+  }
+  
+  return(list(
+    predictions = final_results,
+    ilr_results = ilr_results,
+    metrics = overall_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  ))
+}
+
+# ============================================================================
+# STEP 6: PROCESS ALL VARIABLES
+# ============================================================================
+cat("\n🔄 PROCESSING ALL VARIABLES:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+all_results <- list()
+all_metrics <- data.frame()
+failed_variables <- character(0)
+
+# Process compositional granulometry first
+cat("\n[COMPOSITIONAL] Processing granulometry fractions...\n")
+
+granulo_result <- impute_compositional_granulometry(
+  parcelles_data = parcelles_complete,
+  W_matrix = W.P1_complete,
+  field_map = field_mapping,
+  year_map = year_mapping,
+  verbose = TRUE
+)
+
+if (!is.null(granulo_result)) {
+  all_results[["Granulometry_Compositional"]] <- granulo_result
+  
+  if (!is.null(granulo_result$metrics$fraction_metrics)) {
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(granulo_result$metrics$fraction_metrics[[frac]])) {
+        metrics_row <- data.frame(
+          Variable = frac,
+          N_Total = nrow(parcelles_complete),
+          N_Available = granulo_result$n_sampled,
+          N_Missing = granulo_result$n_unsampled,
+          Pct_Available = round(granulo_result$n_sampled / nrow(parcelles_complete) * 100, 1),
+          Fitting_Time_Min = NA,
+          R_Squared = granulo_result$metrics$fraction_metrics[[frac]]$r_squared,
+          Correlation = NA,
+          RMSE = granulo_result$metrics$fraction_metrics[[frac]]$rmse,
+          MAE = granulo_result$metrics$fraction_metrics[[frac]]$mae,
+          Coverage_Prob = NA,
+          N_Validation = granulo_result$metrics$fraction_metrics[[frac]]$n,
+          DIC = NA,
+          WAIC = NA,
+          stringsAsFactors = FALSE
+        )
+        
+        all_metrics <- rbind(all_metrics, metrics_row)
+      }
+    }
+  }
+  cat("✅ SUCCESS for compositional granulometry\n")
+} else {
+  failed_variables <- c(failed_variables, GRANULO_FRACTIONS)
+  cat("❌ FAILED for compositional granulometry\n")
+}
+
+# Process non-compositional variables
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+  
+  result <- impute_single_variable(
+    variable_name = var_name,
+    parcelles_data = parcelles_complete,
+    W_matrix = W.P1_complete,
+    field_map = field_mapping,
+    year_map = year_mapping,
+    verbose = TRUE
+  )
+  
+  if (!is.null(result)) {
+    all_results[[var_name]] <- result
+    
+    metrics_row <- data.frame(
+      Variable = var_name,
+      N_Total = result$n_total,
+      N_Available = result$n_available,
+      N_Missing = result$n_missing,
+      Pct_Available = result$pct_available,
+      Fitting_Time_Min = result$fitting_time,
+      R_Squared = ifelse(is.null(result$metrics$r_squared), NA, result$metrics$r_squared),
+      Correlation = ifelse(is.null(result$metrics$correlation), NA, result$metrics$correlation),
+      RMSE = ifelse(is.null(result$metrics$rmse), NA, result$metrics$rmse),
+      MAE = ifelse(is.null(result$metrics$mae), NA, result$metrics$mae),
+      Coverage_Prob = ifelse(is.null(result$metrics$coverage_prob), NA, result$metrics$coverage_prob),
+      N_Validation = ifelse(is.null(result$metrics$n_validation), 0, result$metrics$n_validation),
+      DIC = ifelse(is.null(result$model_fit$dic), NA, result$model_fit$dic$dic),
+      WAIC = ifelse(is.null(result$model_fit$waic), NA, result$model_fit$waic$waic),
+      stringsAsFactors = FALSE
+    )
+    
+    all_metrics <- rbind(all_metrics, metrics_row)
+    cat("✅ SUCCESS for", var_name, "\n")
+  } else {
+    failed_variables <- c(failed_variables, var_name)
+    cat("❌ FAILED for", var_name, "\n")
+  }
+}
+
+# ============================================================================
+# STEP 7: COMBINE ALL PREDICTIONS
+# ============================================================================
+cat("\n🔗 COMBINING ALL PREDICTIONS:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+successful_variables <- names(all_results)
+cat("Successfully processed:", length(successful_variables), "variable groups\n")
+
+final_dataset <- parcelles_complete %>% 
+  st_drop_geometry() %>%
+  group_by(Final_Cleaned_ID, Year) %>%
+  mutate(
+    replicate_id = row_number(),
+    unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+  ) %>%
+  ungroup() %>%
+  mutate(original_row_id = row_number())
+
+final_dataset <- parcelles_complete %>%
+  mutate(original_row_id = row_number()) %>%
+  left_join(
+    final_dataset %>% dplyr::select(original_row_id, replicate_id, unique_key),
+    by = "original_row_id"
+  )
+
+replicate_summary <- final_dataset %>% 
+  st_drop_geometry() %>%
+  count(Final_Cleaned_ID, Year) %>% 
+  count(n, name = "combinations")
+
+cat("📊 REPLICATE SUMMARY:\n")
+for(i in 1:nrow(replicate_summary)) {
+  n_reps <- replicate_summary$n[i]
+  n_combinations <- replicate_summary$combinations[i]
+  cat("•", n_combinations, "combinations have", n_reps, "replicate(s) each\n")
+}
+
+# Add granulometry predictions
+if ("Granulometry_Compositional" %in% names(all_results)) {
+  cat("\n[COMPOSITIONAL] Adding granulometry predictions...\n")
+  
+  final_dataset <- final_dataset %>%
+    mutate(obs_id = row_number())
+  
+  granulo_preds <- all_results[["Granulometry_Compositional"]]$predictions
+  
+  final_dataset <- final_dataset %>%
+    left_join(
+      granulo_preds %>% 
+        dplyr::select(obs_id, matches("^Clay_|^Fine_Silt_|^Coarse_Silt_|^Fine_Sand_|^Coarse_Sand_|^ILR_")),
+      by = "obs_id"
+    )
+  
+  check_cols <- paste0(GRANULO_FRACTIONS, "_complete")
+  if (all(check_cols %in% colnames(final_dataset))) {
+    sums <- final_dataset %>%
+      st_drop_geometry() %>%
+      filter(!is.na(Clay_percent_complete)) %>%
+      rowwise() %>%
+      mutate(sum_fractions = sum(c_across(all_of(check_cols)))) %>%
+      pull(sum_fractions)
+    
+    if (length(sums) > 0) {
+      cat("  ✅ Closure verified: sum range [", 
+          round(min(sums), 2), ", ", round(max(sums), 2), "]%\n", sep="")
+    }
+  }
+  
+  final_dataset <- final_dataset %>% dplyr::select(-obs_id)
+  cat("  ✅ Compositional predictions added\n")
+}
+
+# Add non-compositional predictions
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  if (var_name %in% names(all_results)) {
+    cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+    
+    result <- all_results[[var_name]]
+    
+    df_inla_reference <- parcelles_complete %>% 
+      st_drop_geometry() %>% 
+      left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID"), 
+                relationship = "many-to-one") %>%  
+      left_join(year_mapping, by = "Year", 
+                relationship = "many-to-one") %>%  
+      filter(!is.na(Sequential_ID), !is.na(ID.Year)) %>% 
+      group_by(Final_Cleaned_ID, Year) %>%
+      mutate(
+        replicate_id = row_number(),
+        unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+      ) %>%
+      ungroup() %>%
+      mutate(original_row_id = row_number()) %>% 
+      arrange(Sequential_ID, ID.Year, replicate_id) %>%
+      mutate(inla_row_id = row_number())
+    
+    cat("  Reference dataset rows:", nrow(df_inla_reference), "\n")
+    cat("  Prediction rows:", nrow(result$predictions), "\n")
+    
+    if (nrow(df_inla_reference) == nrow(result$predictions)) {
+      predictions_aligned <- df_inla_reference %>% 
+        dplyr::select(Final_Cleaned_ID, Year, replicate_id, unique_key, original_row_id) %>% 
+        bind_cols(
+          result$predictions %>% 
+            dplyr::select(matches(paste0("^", var_name, "_")))
+        )
+      
+      if (any(duplicated(predictions_aligned$unique_key))) {
+        cat("  ❌ Still have duplicates in unique_key - this shouldn't happen!\n")
+        next
+      }
+      
+      final_dataset <- final_dataset %>% 
+        left_join(
+          predictions_aligned %>% dplyr::select(-Final_Cleaned_ID, -Year, -replicate_id, -original_row_id),
+          by = "unique_key"
+        )
+      
+      first_pred_col <- paste0(var_name, "_predicted")
+      var_cols <- colnames(final_dataset)[grepl(paste0("^", var_name), colnames(final_dataset))]
+      
+      if (first_pred_col %in% colnames(final_dataset)) {
+        non_null_count <- sum(!is.na(final_dataset[[first_pred_col]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+        check_col <- first_pred_col
+      } else if (length(var_cols) > 0) {
+        cat("  📋 Found columns:", paste(var_cols, collapse = ", "), "\n")
+        non_null_count <- sum(!is.na(final_dataset[[var_cols[1]]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+        check_col <- var_cols[1]
+      } else {
+        cat("  ❌ No prediction columns found for", var_name, "\n")
+        check_col <- NULL
+      }
+      
+      if (!is.null(check_col)) {
+        replicate_dist <- final_dataset %>% 
+          st_drop_geometry() %>%
+          filter(!is.na(.data[[check_col]])) %>%
+          count(replicate_id) %>%
+          arrange(replicate_id)
+        
+        if (nrow(replicate_dist) > 0) {
+          cat("    Predictions by replicate:", paste(paste0("rep", replicate_dist$replicate_id, ":", replicate_dist$n), collapse = ", "), "\n")
+        }
+      }
+      
+    } else {
+      cat("  ❌ Row count mismatch for", var_name, "- skipping\n")
+      cat("    Reference rows:", nrow(df_inla_reference), "\n")
+      cat("    Prediction rows:", nrow(result$predictions), "\n")
+    }
+    
+    gc()
+  }
+}
+
+final_dataset <- final_dataset %>% 
+  dplyr::select(-original_row_id)
+
+cat("\n✅ Final combined dataset created\n")
+cat("• Total observations:", nrow(final_dataset), "\n")
+cat("• Total columns:", ncol(final_dataset), "\n")
+cat("• Unique combinations (Final_Cleaned_ID + Year):", length(unique(paste0(final_dataset$Final_Cleaned_ID, "_", final_dataset$Year))), "\n")
+cat("• Total replicates:", nrow(final_dataset), "\n")
+
+prediction_cols <- colnames(final_dataset)[grepl("_predicted$|_complete$", colnames(final_dataset))]
+
+if (length(prediction_cols) > 0) {
+  cat("\n📊 PREDICTION SUMMARY:\n")
+  for (col in prediction_cols) {
+    non_null_count <- sum(!is.na(final_dataset[[col]]))
+    cat("•", col, ":", non_null_count, "non-null values\n")
+    
+    if (non_null_count > 0) {
+      rep_dist <- final_dataset %>% 
+        st_drop_geometry() %>%
+        filter(!is.na(.data[[col]])) %>%
+        count(replicate_id, name = "count") %>%
+        arrange(replicate_id)
+      
+      cat("  Distribution:", paste(paste0("rep", rep_dist$replicate_id, ":", rep_dist$count), collapse = ", "), "\n")
+    }
+  }
+} else {
+  cat("\n⚠️  No prediction columns found with standard naming pattern\n")
+  cat("Available columns containing prediction variables:\n")
+  
+  all_var_names <- c(GRANULO_FRACTIONS, NON_COMPOSITIONAL_VARIABLES)
+  for (var_name in all_var_names) {
+    var_cols <- colnames(final_dataset)[grepl(var_name, colnames(final_dataset))]
+    if (length(var_cols) > 0) {
+      cat("• Variable", var_name, ":", paste(var_cols, collapse = ", "), "\n")
+      first_col <- var_cols[1]
+      non_null_vals <- final_dataset[[first_col]][!is.na(final_dataset[[first_col]])]
+      if (length(non_null_vals) > 0) {
+        cat("  Sample values:", paste(head(non_null_vals, 3), collapse = ", "), "...\n")
+        
+        rep_dist <- final_dataset %>% 
+          st_drop_geometry() %>%
+          filter(!is.na(.data[[first_col]])) %>%
+          count(replicate_id, name = "count") %>%
+          arrange(replicate_id)
+        
+        if (nrow(rep_dist) > 0) {
+          cat("  Distribution:", paste(paste0("rep", rep_dist$replicate_id, ":", rep_dist$count), collapse = ", "), "\n")
+        }
+      }
+    }
+  }
+}
+
+cat("\n💡 TIP: Each row now has a 'replicate_id' (1, 2, 3, ...) and 'unique_key' for identification\n")
+cat("   Use these to distinguish between replicates of the same Final_Cleaned_ID + Year combination\n")
+
+gc()
+
+# ============================================================================
+# STEP 8: SAVE COMPREHENSIVE OUTPUTS
+# ============================================================================
+cat("\n💾 SAVING COMPREHENSIVE OUTPUTS:\n")
+cat("=", rep("=", 35), "\n", sep="")
+
+base_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/"
+
+gpkg_output <- paste0(base_path, "parcels_ALL_VARIABLES_enhanced_predictions2.gpkg")
+st_write(final_dataset, gpkg_output, delete_dsn = TRUE, quiet = TRUE)
+cat("✅ Complete dataset saved:", basename(gpkg_output), "\n")
+
+csv_output <- paste0(base_path, "parcels_ALL_VARIABLES_predictions_attributes.csv")
+st_drop_geometry(final_dataset) %>% write_csv(csv_output)
+cat("✅ Attributes saved:", basename(csv_output), "\n")
+
+metrics_output <- paste0(base_path, "ALL_VARIABLES_validation_metrics_summary.csv")
+write_csv(all_metrics, metrics_output)
+cat("✅ Metrics summary saved:", basename(metrics_output), "\n")
+```
+
+## II. Transformation for problematic variables
+
+```{r}
+# ============================================================================
+# TRANSFORMATIONS FOR PROBLEMATIC VARIABLES WITH Z-SCORE OUTLIER REMOVAL
+# Applies Z-score outlier removal BEFORE transformations 
+# Processes only: CN_Ratio, Available_P2O5_mg_kg, Compaction_Index, 
+#                 Electrical_Conductivity_mmho_cm, Exchangeable_Sodium_meq_100g
+# ============================================================================
+
+library(sf)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(spdep)
+library(readr)
+library(purrr)
+library(tibble)
+
+cat("========================================\n")
+cat("  TRANSFORMATIONS WITH         \n")
+cat("  Z-SCORE OUTLIER REMOVAL               \n")
+cat("========================================\n")
+
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET
+# ============================================================================
+cat("📂 LOADING COMPLETE DATASET:\n")
+cat("=", rep("=", 30), "\n", sep="")
+
+# Load the complete dataset
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_normalized_granulo.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stop("Dataset not available")
+}
+
+# Define problematic variables with their transformations
+problematic_variables <- list(
+  "CN_Ratio" = list(
+    original = "CN_Ratio",
+    transformation = "log",
+    description = "Z-score outlier removal + Log transformation",
+    outlier_removal = FALSE,  # Will be handled by Z-score
+    zscore_threshold = 3
+  ),
+  "Available_P2O5_mg_kg" = list(
+    original = "Available_P2O5_mg_kg", 
+    transformation = "log",
+    description = "Z-score outlier removal + Log transformation",
+    outlier_removal = FALSE,  # Will be handled by Z-score
+    zscore_threshold = 3
+  ),
+  "Compaction_Index" = list(
+    original = "Compaction_Index",
+    transformation = "log", 
+    description = "Z-score outlier removal + Log transformation + Student-t distribution for extreme values",
+    distribution = "gaussian",
+    outlier_removal = FALSE,  # Will be handled by Z-score
+    zscore_threshold = 3
+  ),
+  "Electrical_Conductivity_mmho_cm" = list(
+    original = "Electrical_Conductivity_mmho_cm",
+    transformation = "log",
+    description = "Z-score outlier removal + Log transformation",
+    outlier_removal = FALSE,  # Will be handled by Z-score
+    zscore_threshold = 3
+  ),
+  "Exchangeable_Sodium_meq_100g" = list(
+    original = "Exchangeable_Sodium_meq_100g", 
+    transformation = "log",
+    description = "Z-score outlier removal + Log transformation",
+    outlier_removal = FALSE,  # Will be handled by Z-score
+    zscore_threshold = 3
+  )
+)
+
+cat("Variables to process with Z-score outlier removal + transformations:\n")
+for (i in seq_along(problematic_variables)) {
+  var_info <- problematic_variables[[i]]
+  var_name <- names(problematic_variables)[i]
+  cat(sprintf("• %s: %s (Z-score threshold: %s)\n", var_name, var_info$description, var_info$zscore_threshold))
+}
+
+# ============================================================================
+# STEP 2: RECREATE SPATIAL STRUCTURES 
+# ============================================================================
+cat("\n🗺️ RECREATING SPATIAL STRUCTURES:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Get unique parcels with their geometry for W.P1 creation
+unique_parcels_spatial <- parcelles_complete %>%
+  group_by(Final_Cleaned_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(Final_Cleaned_ID)
+
+cat("Unique parcels for spatial analysis:", nrow(unique_parcels_spatial), "\n")
+
+# Ensure geometries are valid
+unique_parcels_spatial <- st_make_valid(unique_parcels_spatial)
+cat("Geometries validated\n")
+
+# Create field mapping for sequential IDs (required for INLA)
+field_mapping <- data.frame(
+  Original_ID = unique_parcels_spatial$Final_Cleaned_ID,
+  Sequential_ID = 1:nrow(unique_parcels_spatial)
+)
+
+cat("Field mapping created: 1 to", nrow(field_mapping), "\n")
+
+# Add Sequential_ID to the spatial data
+unique_parcels_spatial <- unique_parcels_spatial %>%
+  left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+  arrange(Sequential_ID)
+
+# Create spatial weights matrix W.P1
+cat("Computing boundary-to-boundary distances (this may take time)...\n")
+
+# Get parcel boundaries
+boundaries <- st_boundary(unique_parcels_spatial)
+
+# Calculate distance matrix
+dist_matrix <- st_distance(boundaries, boundaries)
+dist_matrix <- units::drop_units(dist_matrix)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated:", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+
+# Use fixed threshold
+DISTANCE_THRESHOLD <- 110
+cat("Using distance threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+# Create adjacency matrix
+W.P1_complete <- matrix(0, nrow = nrow(unique_parcels_spatial), ncol = nrow(unique_parcels_spatial))
+W.P1_complete[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+diag(W.P1_complete) <- 0
+rownames(W.P1_complete) <- colnames(W.P1_complete) <- 1:nrow(W.P1_complete)
+
+# Calculate adjacency statistics
+n_connections <- sum(W.P1_complete)
+avg_neighbors <- n_connections / nrow(unique_parcels_spatial)
+
+cat("✅ W.P1 matrix created:\n")
+cat("• Dimensions:", nrow(W.P1_complete), "x", ncol(W.P1_complete), "\n")
+cat("• Total connections:", n_connections, "\n")
+cat("• Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+
+# Create temporal structure
+years_unique <- sort(unique(parcelles_complete$Year))
+n_years <- length(years_unique)
+year_mapping <- data.frame(
+  Year = years_unique,
+  ID.Year = 1:n_years
+)
+
+cat("Years mapped:", min(years_unique), "to", max(years_unique), "(", n_years, "years)\n")
+
+# ============================================================================
+# STEP 3: Z-SCORE OUTLIER REMOVAL FUNCTION
+# ============================================================================
+remove_zscore_outliers <- function(data, variable_name, threshold = 3, verbose = TRUE) {
+  # Remove outliers based on Z-score threshold
+  # 
+  # Args:
+  #   data: dataframe containing the variable
+  #   variable_name: name of the variable column
+  #   threshold: Z-score threshold (default = 3)
+  #   verbose: whether to print details
+  # 
+  # Returns:
+  #   Modified dataframe with outliers set to NA
+  
+  original_values <- data[[variable_name]]
+  n_total <- length(original_values)
+  n_available_before <- sum(!is.na(original_values))
+  
+  if (n_available_before < 10) {
+    if (verbose) cat("  ⚠️  Insufficient data for Z-score outlier removal\n")
+    return(data)
+  }
+  
+  # Calculate Z-scores
+  mean_val <- mean(original_values, na.rm = TRUE)
+  sd_val <- sd(original_values, na.rm = TRUE)
+  
+  if (sd_val == 0) {
+    if (verbose) cat("  ⚠️  Zero standard deviation - no outliers removed\n")
+    return(data)
+  }
+  
+  z_scores <- abs((original_values - mean_val) / sd_val)
+  
+  # Identify outliers
+  outliers <- !is.na(z_scores) & z_scores > threshold
+  n_outliers <- sum(outliers)
+  
+  # Remove outliers (set to NA)
+  data_modified <- data
+  data_modified[[variable_name]][outliers] <- NA
+  
+  n_available_after <- sum(!is.na(data_modified[[variable_name]]))
+  pct_removed <- round((n_outliers / n_available_before) * 100, 1)
+  
+  if (verbose) {
+    cat("  🗑️  Z-score outlier removal (threshold =", threshold, "):\n")
+    cat("    • Original available:", n_available_before, "\n")
+    cat("    • Outliers removed:", n_outliers, "(", pct_removed, "%)\n")
+    cat("    • Remaining available:", n_available_after, "\n")
+    if (n_outliers > 0) {
+      outlier_values <- original_values[outliers]
+      cat("    • Outlier range:", round(min(outlier_values, na.rm = TRUE), 3), "to", 
+          round(max(outlier_values, na.rm = TRUE), 3), "\n")
+      cat("    • Max Z-score removed:", round(max(z_scores[outliers], na.rm = TRUE), 2), "\n")
+    }
+  }
+  
+  return(data_modified)
+}
+
+# ============================================================================
+# STEP 4: IMPUTATION FUNCTION WITH Z-SCORE OUTLIER REMOVAL
+# ============================================================================
+impute_transformed_variable_with_zscore <- function(variable_info, variable_key, parcelles_data, W_matrix, field_map, year_map, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 70), "\n", sep="")
+    cat("🔬 PROCESSING TRANSFORMED VARIABLE WITH Z-SCORE OUTLIER REMOVAL:", variable_key, "\n")
+    cat("Original variable:", variable_info$original, "\n")
+    cat("Z-score threshold:", variable_info$zscore_threshold, "\n")
+    cat("Transformation:", variable_info$transformation, "\n")
+    cat("Description:", variable_info$description, "\n")
+    cat("=", rep("=", 70), "\n", sep="")
+  }
+  
+  # Get original values
+  original_var <- variable_info$original
+  var_values <- parcelles_data[[original_var]]
+  n_total <- length(var_values)
+  n_available <- sum(!is.na(var_values))
+  n_missing <- n_total - n_available
+  pct_available <- round(n_available/n_total*100, 1)
+  
+  if (verbose) {
+    cat("Original variable statistics:\n")
+    cat("• Total observations:", n_total, "\n")
+    cat("• Available (non-NA):", n_available, "(", pct_available, "%)\n")
+    cat("• Missing (NA):", n_missing, "(", round(n_missing/n_total*100, 1), "%)\n")
+    
+    if (n_available > 0) {
+      cat("• Min value:", round(min(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Max value:", round(max(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Mean value:", round(mean(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Std deviation:", round(sd(var_values, na.rm = TRUE), 3), "\n")
+    }
+  }
+  
+  # Skip if insufficient data
+  if (n_available < 10) {
+    if (verbose) cat("❌ Insufficient data (< 10 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  # Create working dataset
+  working_data <- parcelles_data
+  
+  # STEP 1: Apply Z-score outlier removal FIRST
+  if (verbose) cat("\n🎯 STEP 1: Z-SCORE OUTLIER REMOVAL\n")
+  working_data <- remove_zscore_outliers(
+    working_data, 
+    original_var, 
+    threshold = variable_info$zscore_threshold, 
+    verbose = verbose
+  )
+  
+  # Check remaining data after Z-score removal
+  n_available_after_zscore <- sum(!is.na(working_data[[original_var]]))
+  if (n_available_after_zscore < 10) {
+    if (verbose) cat("❌ Insufficient data after Z-score removal (< 10 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  # STEP 2: Apply additional outlier removal if specified (legacy support)
+  if (variable_info$outlier_removal && !is.null(variable_info$outlier_threshold)) {
+    if (verbose) cat("\n🗑️ STEP 2: ADDITIONAL OUTLIER REMOVAL\n")
+    threshold <- variable_info$outlier_threshold
+    outliers_removed <- sum(working_data[[original_var]] > threshold, na.rm = TRUE)
+    working_data <- working_data %>%
+      mutate(!!original_var := ifelse(.data[[original_var]] > threshold, NA, .data[[original_var]]))
+    
+    if (verbose) {
+      cat("  • Additional threshold:", threshold, "\n")
+      cat("  • Additional values removed:", outliers_removed, "\n")
+      n_available_after_additional <- sum(!is.na(working_data[[original_var]]))
+      cat("  • Remaining available:", n_available_after_additional, "\n")
+    }
+  }
+  
+  # STEP 3: Apply transformation
+  if (verbose) cat("\n📈 STEP 3: APPLYING TRANSFORMATION\n")
+  transform_name <- paste0(original_var, "_transformed")
+  
+  if (variable_info$transformation == "log") {
+    # Use log(x+1) to handle zeros
+    working_data <- working_data %>%
+      mutate(!!transform_name := log(.data[[original_var]] + 1))
+    
+    if (verbose) {
+      cat("  ✅ Log(x+1) transformation applied\n")
+      transformed_values <- working_data[[transform_name]]
+      n_transformed <- sum(!is.na(transformed_values))
+      if (n_transformed > 0) {
+        cat("  • Transformed min:", round(min(transformed_values, na.rm = TRUE), 3), "\n")
+        cat("  • Transformed max:", round(max(transformed_values, na.rm = TRUE), 3), "\n")
+        cat("  • Transformed mean:", round(mean(transformed_values, na.rm = TRUE), 3), "\n")
+        cat("  • Transformed std:", round(sd(transformed_values, na.rm = TRUE), 3), "\n")
+      }
+    }
+  } else {
+    # No transformation, just copy
+    working_data <- working_data %>%
+      mutate(!!transform_name := .data[[original_var]])
+  }
+  
+  # Create train/validation split
+  observed_data <- working_data %>% filter(!is.na(.data[[transform_name]]))
+  
+  set.seed(123)  # Consistent split
+  unique_parcels_with_data <- observed_data %>%
+    st_drop_geometry() %>%
+    dplyr::select(Final_Cleaned_ID) %>%
+    distinct() %>%
+    mutate(split = sample(c("train", "val"), n(), replace = TRUE, prob = c(0.9, 0.1)))
+  
+  # Apply split
+  working_data_split <- working_data %>%
+    left_join(unique_parcels_with_data, by = "Final_Cleaned_ID") %>%
+    mutate(
+      data_split = case_when(
+        is.na(.data[[transform_name]]) ~ "predict",
+        split == "train" ~ "train", 
+        split == "val" ~ "validation",
+        TRUE ~ "predict"
+      )
+    ) %>%
+    dplyr::select(-split)
+  
+  train_obs <- sum(working_data_split$data_split == "train")
+  val_obs <- sum(working_data_split$data_split == "validation")
+  pred_obs <- sum(working_data_split$data_split == "predict")
+  
+  if (verbose) {
+    cat("\n📊 STEP 4: DATA SPLIT\n")
+    cat("  • Training:", train_obs, "\n")
+    cat("  • Validation:", val_obs, "\n")
+    cat("  • To predict:", pred_obs, "\n")
+  }
+  
+  # Prepare INLA dataset
+  df_inla <- working_data_split %>%
+    st_drop_geometry() %>%
+    left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+    left_join(year_map, by = "Year") %>%
+    mutate(
+      Y = case_when(
+        data_split == "train" ~ .data[[transform_name]],
+        TRUE ~ NA_real_
+      ),
+      Y_true_original = .data[[original_var]],
+      Y_true_transformed = .data[[transform_name]], 
+      ID.Field = Sequential_ID,
+      ID.Year = as.integer(ID.Year),
+      Month = as.integer(ifelse(is.na(Month), 6, Month)),
+      Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+      Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+      irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+    ) %>%
+    filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+    group_by(Final_Cleaned_ID, Year) %>%
+    mutate(
+      replicate_id = row_number(),
+      unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+    ) %>%
+    ungroup() %>%
+    arrange(ID.Field, ID.Year, replicate_id)
+  
+  # Check compatibility
+  if (max(df_inla$ID.Field) > nrow(W_matrix)) {
+    if (verbose) cat("❌ Spatial structure incompatible. Skipping variable.\n")
+    return(NULL)
+  }
+  
+  if (verbose) cat("\n🚀 STEP 5: FITTING ENHANCED SPATIO-TEMPORAL MODEL\n")
+  
+  # Determine distribution family
+  family_to_use <- "gaussian"
+  if (!is.null(variable_info$distribution) && variable_info$distribution == "t") {
+    family_to_use <- "T"  # Student-t distribution in INLA
+    if (verbose) cat("  📊 Using Student-t distribution for robustness\n")
+  }
+  
+  # Fit model
+  start_time <- Sys.time()
+  
+  fit_result <- tryCatch({
+    prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+    
+    inla(
+      Y ~ 1 + Bloc + irrg_ty +
+        f(ID.Field, model = "besag", graph = W_matrix,
+          group = ID.Year, 
+          control.group = list(model = "ar1"),
+          hyper = list(prec = prec_prior),
+          constr = TRUE),
+      data = df_inla,
+      family = family_to_use,
+      control.predictor = list(compute = TRUE, link = 1),
+      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+      control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+      verbose = FALSE
+    )
+  }, error = function(e) {
+    if (verbose) cat("  ❌ Full model failed. Trying simpler model...\n")
+    
+    # Try simpler model
+    tryCatch({
+      inla(
+        Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+        data = df_inla,
+        family = family_to_use,
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE),
+        verbose = FALSE
+      )
+    }, error = function(e2) {
+      if (verbose) cat("  ❌ Simple model also failed:", e2$message, "\n")
+      return(NULL)
+    })
+  })
+  
+  end_time <- Sys.time()
+  fitting_time <- as.numeric(difftime(end_time, start_time, units = "mins"))
+  
+  if (is.null(fit_result) || is.null(fit_result$summary.fitted.values)) {
+    if (verbose) cat("❌ Model fitting failed completely\n")
+    return(NULL)
+  }
+  
+  if (verbose) {
+    cat("  ✅ Model successful! Fitting time:", round(fitting_time, 1), "minutes\n")
+    if (!is.null(fit_result$dic)) cat("  • DIC:", round(fit_result$dic$dic, 2), "\n")
+    if (!is.null(fit_result$waic)) cat("  • WAIC:", round(fit_result$waic$waic, 2), "\n")
+  }
+  
+  # Extract predictions
+  predictions <- fit_result$summary.fitted.values
+  
+  # Back-transform predictions if needed
+  if (variable_info$transformation == "log") {
+    predictions_original <- list(
+      mean = exp(predictions$mean) - 1,
+      sd = exp(predictions$mean) * predictions$sd,  
+      `0.025quant` = exp(predictions$`0.025quant`) - 1,
+      `0.975quant` = exp(predictions$`0.975quant`) - 1
+    )
+    
+    # Ensure no negative values after transformation
+    predictions_original$mean <- pmax(predictions_original$mean, 0)
+    predictions_original$`0.025quant` <- pmax(predictions_original$`0.025quant`, 0)
+    predictions_original$`0.975quant` <- pmax(predictions_original$`0.975quant`, 0)
+    
+    if (verbose) cat("  🔄 Back-transformation applied (exp(x) - 1)\n")
+  } else {
+    predictions_original <- predictions
+  }
+  
+  # Create predictions dataframe with both scales
+  df_predicted <- df_inla %>%
+    mutate(
+      # Transformed scale predictions
+      !!paste0(variable_key, "_transformed_predicted") := predictions$mean,
+      !!paste0(variable_key, "_transformed_predicted_sd") := predictions$sd,
+      !!paste0(variable_key, "_transformed_predicted_lower") := predictions$`0.025quant`,
+      !!paste0(variable_key, "_transformed_predicted_upper") := predictions$`0.975quant`,
+      
+      # Original scale predictions  
+      !!paste0(variable_key, "_predicted") := predictions_original$mean,
+      !!paste0(variable_key, "_predicted_sd") := predictions_original$sd,
+      !!paste0(variable_key, "_predicted_lower") := predictions_original$`0.025quant`,
+      !!paste0(variable_key, "_predicted_upper") := predictions_original$`0.975quant`,
+      
+      # Complete dataset (original scale)
+      !!paste0(variable_key, "_complete") := case_when(
+        data_split == "train" ~ Y_true_original,
+        TRUE ~ predictions_original$mean
+      ),
+      
+      # Prediction type
+      !!paste0(variable_key, "_prediction_type") := case_when(
+        data_split == "train" ~ "Training",
+        data_split == "validation" ~ "Validation", 
+        data_split == "predict" ~ "Predicted"
+      )
+    )
+  
+  # Calculate validation metrics (on original scale)
+  validation_data <- df_predicted %>%
+    filter(data_split == "validation", !is.na(Y_true_original), !is.na(predictions_original$mean))
+  
+  metrics <- list(
+    variable = variable_key,
+    original_variable = original_var,
+    transformation = variable_info$transformation,
+    distribution = ifelse(is.null(variable_info$distribution), "gaussian", variable_info$distribution),
+    zscore_threshold = variable_info$zscore_threshold,
+    n_outliers_removed = n_available - sum(!is.na(working_data[[original_var]]))
+  )
+  
+  if (nrow(validation_data) > 5) {
+    pred_vals <- validation_data[[paste0(variable_key, "_predicted")]]
+    true_vals <- validation_data$Y_true_original
+    
+    ss_res <- sum((true_vals - pred_vals)^2)
+    ss_tot <- sum((true_vals - mean(true_vals))^2)
+    r_squared <- 1 - (ss_res / ss_tot)
+    
+    metrics$r_squared <- r_squared
+    metrics$correlation <- cor(true_vals, pred_vals)
+    metrics$rmse <- sqrt(mean((true_vals - pred_vals)^2))
+    metrics$mae <- mean(abs(true_vals - pred_vals))
+    metrics$mean_error <- mean(true_vals - pred_vals)
+    metrics$n_validation <- nrow(validation_data)
+    
+    # Coverage probability (original scale)
+    in_interval <- sum(validation_data$Y_true_original >= validation_data[[paste0(variable_key, "_predicted_lower")]] & 
+                      validation_data$Y_true_original <= validation_data[[paste0(variable_key, "_predicted_upper")]])
+    metrics$coverage_prob <- in_interval / nrow(validation_data)
+    
+    if (verbose) {
+      cat("\n🎯 STEP 6: VALIDATION RESULTS (ORIGINAL SCALE)\n")
+      cat("  • Validation obs:", metrics$n_validation, "\n")
+      cat("  • R²:", round(metrics$r_squared, 4), "\n")
+      cat("  • Correlation:", round(metrics$correlation, 4), "\n") 
+      cat("  • RMSE:", round(metrics$rmse, 4), "\n")
+      cat("  • MAE:", round(metrics$mae, 4), "\n")
+      cat("  • Coverage:", round(metrics$coverage_prob * 100, 1), "%\n")
+      cat("  • Z-score outliers removed:", metrics$n_outliers_removed, "\n")
+    }
+  } else {
+    metrics$r_squared <- NA
+    metrics$correlation <- NA
+    metrics$rmse <- NA
+    metrics$mae <- NA
+    metrics$mean_error <- NA
+    metrics$n_validation <- nrow(validation_data)
+    metrics$coverage_prob <- NA
+    
+    if (verbose) cat("❌ Insufficient validation data for metrics\n")
+  }
+  
+  # Create return object
+  result <- list(
+    variable_name = variable_key,
+    original_variable = original_var,
+    transformation_info = variable_info,
+    model_fit = fit_result,
+    predictions = df_predicted,
+    metrics = metrics,
+    fitting_time = fitting_time,
+    n_total = n_total,
+    n_available = sum(!is.na(working_data[[original_var]])),  # After all outlier removal
+    n_missing = sum(is.na(working_data[[original_var]])),
+    pct_available = round(sum(!is.na(working_data[[original_var]]))/n_total*100, 1),
+    n_zscore_outliers_removed = metrics$n_outliers_removed
+  )
+  
+  return(result)
+}
+
+# ============================================================================
+# STEP 5: PROCESS ALL PROBLEMATIC VARIABLES
+# ============================================================================
+cat("\n🔄 PROCESSING ALL", length(problematic_variables), "PROBLEMATIC VARIABLES WITH Z-SCORE OUTLIER REMOVAL:\n")
+cat("=", rep("=", 80), "\n", sep="")
+
+# Initialize results storage
+enhanced_results <- list()
+enhanced_metrics <- data.frame()
+enhanced_failed <- character(0)
+start_processing <- Sys.time()
+
+# Process each problematic variable
+for (i in seq_along(problematic_variables)) {
+  var_key <- names(problematic_variables)[i]
+  var_info <- problematic_variables[[i]]
+  
+  cat("\n[", i, "/", length(problematic_variables), "] Processing:", var_key, "\n")
+  
+  result <- impute_transformed_variable_with_zscore(
+    variable_info = var_info,
+    variable_key = var_key,
+    parcelles_data = parcelles_complete,
+    W_matrix = W.P1_complete,
+    field_map = field_mapping,
+    year_map = year_mapping,
+    verbose = TRUE
+  )
+  
+  if (!is.null(result)) {
+    enhanced_results[[var_key]] <- result
+    
+    # Store metrics
+    metrics_row <- data.frame(
+      Variable = var_key,
+      Original_Variable = var_info$original,
+      Transformation = var_info$transformation,
+      Distribution = ifelse(is.null(var_info$distribution), "gaussian", var_info$distribution),
+      ZScore_Threshold = var_info$zscore_threshold,
+      ZScore_Outliers_Removed = result$n_zscore_outliers_removed,
+      Outlier_Removal = var_info$outlier_removal,
+      N_Total = result$n_total,
+      N_Available = result$n_available,
+      N_Missing = result$n_missing,
+      Pct_Available = result$pct_available,
+      Fitting_Time_Min = result$fitting_time,
+      R_Squared = ifelse(is.null(result$metrics$r_squared), NA, result$metrics$r_squared),
+      Correlation = ifelse(is.null(result$metrics$correlation), NA, result$metrics$correlation),
+      RMSE = ifelse(is.null(result$metrics$rmse), NA, result$metrics$rmse),
+      MAE = ifelse(is.null(result$metrics$mae), NA, result$metrics$mae),
+      Coverage_Prob = ifelse(is.null(result$metrics$coverage_prob), NA, result$metrics$coverage_prob),
+      N_Validation = ifelse(is.null(result$metrics$n_validation), 0, result$metrics$n_validation),
+      DIC = ifelse(is.null(result$model_fit$dic), NA, result$model_fit$dic$dic),
+      WAIC = ifelse(is.null(result$model_fit$waic), NA, result$model_fit$waic$waic),
+      stringsAsFactors = FALSE
+    )
+    
+    enhanced_metrics <- rbind(enhanced_metrics, metrics_row)
+    cat("✅ SUCCESS for", var_key, "\n")
+  } else {
+    enhanced_failed <- c(enhanced_failed, var_key)
+    cat("❌ FAILED for", var_key, "\n")
+  }
+  
+  # Memory cleanup
+  gc()
+}
+
+end_processing <- Sys.time()
+total_processing_time <- as.numeric(difftime(end_processing, start_processing, units = "mins"))
+
+# ============================================================================
+# STEP 6: COMBINE ENHANCED PREDICTIONS
+# ============================================================================
+cat("\n🔗 COMBINING ENHANCED PREDICTIONS:\n")
+cat("=", rep("=", 38), "\n", sep="")
+
+successful_enhanced <- names(enhanced_results)
+cat("Successfully processed variables:", length(successful_enhanced), "\n")
+
+if (length(successful_enhanced) > 0) {
+  # Start with original dataset
+  enhanced_dataset <- parcelles_complete %>% 
+    st_drop_geometry() %>%
+    group_by(Final_Cleaned_ID, Year) %>%
+    mutate(
+      replicate_id = row_number(),
+      unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+    ) %>%
+    ungroup()
+  
+  # Add geometry back
+  enhanced_dataset <- parcelles_complete %>%
+    mutate(original_row_id = row_number()) %>%
+    left_join(
+      enhanced_dataset %>% 
+        mutate(original_row_id = row_number()) %>%
+        dplyr::select(original_row_id, replicate_id, unique_key),
+      by = "original_row_id"
+    ) %>%
+    dplyr::select(-original_row_id)
+  
+  # Add predictions for each variable
+  for (i in seq_along(successful_enhanced)) {
+    var_key <- successful_enhanced[i]
+    result <- enhanced_results[[var_key]]
+    
+    cat("\n[", i, "/", length(successful_enhanced), "] Adding predictions for:", var_key, "\n")
+    
+    # Create reference dataset matching INLA processing
+    df_inla_reference <- parcelles_complete %>% 
+      st_drop_geometry() %>% 
+      left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%  
+      left_join(year_mapping, by = "Year") %>%  
+      filter(!is.na(Sequential_ID), !is.na(ID.Year)) %>% 
+      group_by(Final_Cleaned_ID, Year) %>%
+      mutate(
+        replicate_id = row_number(),
+        unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+      ) %>%
+      ungroup() %>%
+      arrange(Sequential_ID, ID.Year, replicate_id)
+    
+    if (nrow(df_inla_reference) == nrow(result$predictions)) {
+      # Align predictions
+      predictions_aligned <- df_inla_reference %>% 
+        dplyr::select(Final_Cleaned_ID, Year, replicate_id, unique_key) %>% 
+        bind_cols(
+          result$predictions %>% 
+            dplyr::select(matches(paste0("^", var_key, "_")))
+        )
+      
+      # Join to main dataset
+      enhanced_dataset <- enhanced_dataset %>% 
+        left_join(
+          predictions_aligned %>% dplyr::select(-Final_Cleaned_ID, -Year, -replicate_id),
+          by = "unique_key"
+        )
+      
+      # Check success
+      pred_col <- paste0(var_key, "_predicted")
+      if (pred_col %in% colnames(enhanced_dataset)) {
+        non_null_count <- sum(!is.na(enhanced_dataset[[pred_col]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions\n")
+      }
+    } else {
+      cat("  ❌ Row count mismatch - skipping\n")
+    }
+  }
+  
+  cat("\n✅ Enhanced dataset created\n")
+  cat("• Total observations:", nrow(enhanced_dataset), "\n")
+  cat("• Total columns:", ncol(enhanced_dataset), "\n")
+  
+  # Show prediction summary
+  pred_cols <- colnames(enhanced_dataset)[grepl("_predicted$", colnames(enhanced_dataset))]
+  if (length(pred_cols) > 0) {
+    cat("\n📊 ENHANCED PREDICTIONS SUMMARY:\n")
+    for (col in pred_cols) {
+      non_null_count <- sum(!is.na(enhanced_dataset[[col]]))
+      cat("•", col, ":", non_null_count, "non-null values\n")
+    }
+  }
+}
+
+# ============================================================================
+# STEP 7: SAVE ENHANCED OUTPUTS
+# ============================================================================
+cat("\n💾 SAVING ENHANCED OUTPUTS:\n")
+cat("=", rep("=", 28), "\n", sep="")
+
+base_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/"
+
+if (length(successful_enhanced) > 0) {
+  # 1. Save enhanced dataset as GeoPackage
+  gpkg_enhanced <- paste0(base_path, "parcels_ENHANCED_TRANSFORMATIONS_predictions.gpkg")
+  st_write(enhanced_dataset, gpkg_enhanced, delete_dsn = TRUE, quiet = TRUE)
+  cat("✅ Enhanced dataset saved:", basename(gpkg_enhanced), "\n")
+  
+  # 2. Save attributes only as CSV
+  csv_enhanced <- paste0(base_path, "parcels_ENHANCED_TRANSFORMATIONS_attributes.csv")
+  st_drop_geometry(enhanced_dataset) %>% write_csv(csv_enhanced)
+  cat("✅ Enhanced attributes saved:", basename(csv_enhanced), "\n")
+}
+
+# 3. Save enhanced metrics
+metrics_enhanced <- paste0(base_path, "ENHANCED_TRANSFORMATIONS_metrics.csv")
+write_csv(enhanced_metrics, metrics_enhanced)
+cat("✅ Enhanced metrics saved:", basename(metrics_enhanced), "\n")
+
+# 4. Save enhanced model objects
+models_enhanced <- paste0(base_path, "ENHANCED_TRANSFORMATIONS_model_objects.RData")
+save(enhanced_results, problematic_variables, successful_enhanced, enhanced_failed, 
+     enhanced_metrics, file = models_enhanced)
+cat("✅ Enhanced model objects saved:", basename(models_enhanced), "\n")
+```

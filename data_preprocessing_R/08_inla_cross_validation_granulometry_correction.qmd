@@ -1,0 +1,4369 @@
+---
+title: "INLA Cross-Validation"
+author: "Antsa Sarobidy"
+format: html
+editor: visual
+---
+
+# I. Part 1 : MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH 5-FOLD CROSS-VALIDATION
+
+## I.1. Data Loading and Variable Definition + MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH 5-FOLD CROSS-VALIDATION
+
+This section loads the normalized soil dataset from the geopackage file and defines two categories of variables for analysis. The compositional variables consist of five granulometry fractions that must sum to 100% (clay, fine silt, coarse silt, fine sand, and coarse sand), while non-compositional variables include 18 independent soil properties such as pH, nutrient content, and various ratios. The code validates the completeness of granulometry data and calculates summary statistics for all variables including their availability rates across the dataset.
+
+```{r}
+# ============================================================================
+# MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH 5-FOLD CROSS-VALIDATION
+# Compositional treatment for granulometry fractions
+# ============================================================================
+
+library(sf)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(spdep)
+library(readr)
+library(purrr)
+library(tibble)
+
+cat("========================================\n")
+cat("  MULTI-VARIABLE SPATIO-TEMPORAL       \n")
+cat("  IMPUTATION WITH 5-FOLD CV            \n")
+cat("========================================\n")
+
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET AND IDENTIFY SOIL VARIABLES
+# ============================================================================
+cat("📂 LOADING COMPLETE DATASET AND IDENTIFYING SOIL VARIABLES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_complete.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stop("Dataset not available")
+}
+
+# Define compositional and non-compositional variables
+GRANULO_FRACTIONS <- c(
+  "Clay_percent",
+  "Fine_Silt_percent",
+  "Coarse_Silt_percent",
+  "Fine_Sand_percent",
+  "Coarse_Sand_percent"
+)
+
+NON_COMPOSITIONAL_VARIABLES <- c(
+  "pH",
+  "CN_Ratio", 
+  "Electrical_Conductivity_mmho_cm",
+  "Exchangeable_Calcium_meq_100g",
+  "Exchangeable_Magnesium_meq_100g", 
+  "Exchangeable_Sodium_meq_100g",
+  "Exchangeable_Potassium_meq_100g",
+  "Available_P2O5_mg_kg",
+  "Organic_Carbon_per_mille",
+  "Total_Nitrogen_per_mille",
+  "Total_Silt_percent",
+  "Total_Sand_percent", 
+  "Organic_Matter_percent",
+  "Sum_of_Exchangeable_Bases_meq_100g",
+  "CaO_g_100g",
+  "Mg_Ca_Ratio",
+  "Mg_K_Ratio",
+  "Compaction_Index"
+)
+
+cat("Compositional variables (granulometry):", length(GRANULO_FRACTIONS), "\n")
+cat("Non-compositional variables:", length(NON_COMPOSITIONAL_VARIABLES), "\n")
+
+for (i in seq_along(GRANULO_FRACTIONS)) {
+  var_name <- GRANULO_FRACTIONS[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              length(GRANULO_FRACTIONS) + i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+cat("\nDataset structure:\n")
+cat("• Total observations:", nrow(parcelles_complete), "\n")
+cat("• Unique parcels:", length(unique(parcelles_complete$Final_Cleaned_ID)), "\n")
+cat("• Year range:", min(parcelles_complete$Year, na.rm = TRUE), "-", max(parcelles_complete$Year, na.rm = TRUE), "\n")
+
+# Validate compositional data
+parcelles_complete <- parcelles_complete %>%
+  mutate(
+    has_complete_granulo = !is.na(Clay_percent) & 
+                          !is.na(Fine_Silt_percent) & 
+                          !is.na(Coarse_Silt_percent) & 
+                          !is.na(Fine_Sand_percent) & 
+                          !is.na(Coarse_Sand_percent),
+    granulo_sum = Clay_percent + Fine_Silt_percent + Coarse_Silt_percent + 
+                  Fine_Sand_percent + Coarse_Sand_percent
+  )
+
+complete_granulo <- sum(parcelles_complete$has_complete_granulo, na.rm = TRUE)
+cat("\n🔍 COMPOSITIONAL DATA VALIDATION:\n")
+cat("• Observations with complete granulometry:", complete_granulo, "\n")
+
+if(complete_granulo > 0) {
+  sum_stats <- parcelles_complete %>%
+    filter(has_complete_granulo) %>%
+    pull(granulo_sum) %>%
+    summary()
+  cat("• Sum range:", round(sum_stats[1], 2), "to", round(sum_stats[6], 2), "%\n")
+}
+
+# ============================================================================
+# STEP 2: PREPARE SHARED SPATIAL STRUCTURE
+# ============================================================================
+cat("\n🗺️ PREPARING SHARED SPATIAL STRUCTURE:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+unique_parcels_spatial <- parcelles_complete %>%
+  group_by(Final_Cleaned_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(Final_Cleaned_ID)
+
+cat("Unique parcels for spatial analysis:", nrow(unique_parcels_spatial), "\n")
+
+unique_parcels_spatial <- st_make_valid(unique_parcels_spatial)
+cat("Geometries validated\n")
+
+field_mapping <- data.frame(
+  Original_ID = unique_parcels_spatial$Final_Cleaned_ID,
+  Sequential_ID = 1:nrow(unique_parcels_spatial)
+)
+
+cat("Field mapping created: 1 to", nrow(field_mapping), "\n")
+
+unique_parcels_spatial <- unique_parcels_spatial %>%
+  left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+  arrange(Sequential_ID)
+
+# ============================================================================
+# STEP 3: CREATE SPATIAL WEIGHTS MATRIX W.P1
+# ============================================================================
+cat("\n🔗 CREATING SHARED SPATIAL WEIGHTS MATRIX:\n")
+cat("=", rep("=", 42), "\n", sep="")
+
+cat("Computing boundary-to-boundary distances (this may take time)...\n")
+
+boundaries <- st_boundary(unique_parcels_spatial)
+dist_matrix <- st_distance(boundaries, boundaries)
+dist_matrix <- units::drop_units(dist_matrix)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated:", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+
+DISTANCE_THRESHOLD <- 110
+cat("Using distance threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+W.P1_complete <- matrix(0, nrow = nrow(unique_parcels_spatial), ncol = nrow(unique_parcels_spatial))
+W.P1_complete[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+diag(W.P1_complete) <- 0
+rownames(W.P1_complete) <- colnames(W.P1_complete) <- 1:nrow(W.P1_complete)
+
+n_connections <- sum(W.P1_complete)
+avg_neighbors <- n_connections / nrow(unique_parcels_spatial)
+
+cat("✅ W.P1 matrix created:\n")
+cat("• Dimensions:", nrow(W.P1_complete), "x", ncol(W.P1_complete), "\n")
+cat("• Total connections:", n_connections, "\n")
+cat("• Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+
+# ============================================================================
+# STEP 4: PREPARE SHARED TEMPORAL STRUCTURE
+# ============================================================================
+years_unique <- sort(unique(parcelles_complete$Year))
+n_years <- length(years_unique)
+year_mapping <- data.frame(
+  Year = years_unique,
+  ID.Year = 1:n_years
+)
+
+cat("Years mapped:", min(years_unique), "to", max(years_unique), "(", n_years, "years)\n")
+
+# ============================================================================
+# ILR TRANSFORMATION FUNCTIONS
+# ============================================================================
+
+create_ilr_basis <- function(D) {
+  V <- matrix(0, nrow = D - 1, ncol = D)
+  for (i in 1:(D - 1)) {
+    V[i, 1:i] <- 1/i
+    V[i, i + 1] <- -1
+    V[i, ] <- V[i, ] * sqrt(i / (i + 1))
+  }
+  return(V)
+}
+
+ilr_transform <- function(composition_matrix) {
+  D <- ncol(composition_matrix)
+  V <- create_ilr_basis(D)
+  log_comp <- log(composition_matrix)
+  ilr_coords <- log_comp %*% t(V)
+  return(ilr_coords)
+}
+
+ilr_inverse <- function(ilr_matrix) {
+  D <- ncol(ilr_matrix) + 1
+  V <- create_ilr_basis(D)
+  log_comp <- ilr_matrix %*% V
+  composition <- exp(log_comp)
+  row_sums <- rowSums(composition)
+  composition <- composition / row_sums
+  return(composition)
+}
+
+# ============================================================================
+# STEP 5: CREATE 5-FOLD CV SPLITS
+# ============================================================================
+
+create_cv_folds <- function(unique_ids, n_folds = 5, seed = 123) {
+  set.seed(seed)
+  n <- length(unique_ids)
+  fold_ids <- sample(rep(1:n_folds, length.out = n))
+  
+  fold_assignment <- data.frame(
+    Final_Cleaned_ID = unique_ids,
+    cv_fold = fold_ids
+  )
+  
+  return(fold_assignment)
+}
+
+# ============================================================================
+# STEP 6: DEFINE IMPUTATION FUNCTIONS WITH CV
+# ============================================================================
+
+# Non-compositional imputation with 5-fold CV
+impute_single_variable_cv <- function(variable_name, parcelles_data, W_matrix, field_map, year_map, 
+                                      cv_folds, n_folds = 5, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING VARIABLE:", variable_name, "\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  var_values <- parcelles_data[[variable_name]]
+  n_total <- length(var_values)
+  n_available <- sum(!is.na(var_values))
+  n_missing <- n_total - n_available
+  pct_available <- round(n_available/n_total*100, 1)
+  
+  if (verbose) {
+    cat("Variable statistics:\n")
+    cat("• Total observations:", n_total, "\n")
+    cat("• Available (non-NA):", n_available, "(", pct_available, "%)\n")
+    cat("• Missing (NA):", n_missing, "(", round(n_missing/n_total*100, 1), "%)\n")
+    
+    if (n_available > 0) {
+      cat("• Min value:", round(min(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Max value:", round(max(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Mean value:", round(mean(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Std deviation:", round(sd(var_values, na.rm = TRUE), 3), "\n")
+    }
+  }
+  
+  if (n_available < 20) {
+    if (verbose) cat("❌ Insufficient data (< 20 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  # Initialize storage for all fold results
+  all_fold_predictions <- list()
+  fold_metrics <- list()
+  
+  # Loop through each fold
+  for (fold in 1:n_folds) {
+    if (verbose) cat("\n  📊 Processing Fold", fold, "/", n_folds, "...\n")
+    
+    # Assign train/validation based on current fold
+    parcelles_data_fold <- parcelles_data %>%
+      left_join(cv_folds, by = "Final_Cleaned_ID") %>%
+      mutate(
+        data_split = case_when(
+          is.na(.data[[variable_name]]) ~ "predict",
+          cv_fold == fold ~ "validation",
+          !is.na(.data[[variable_name]]) ~ "train",
+          TRUE ~ "predict"
+        )
+      )
+    
+    train_obs <- sum(parcelles_data_fold$data_split == "train")
+    val_obs <- sum(parcelles_data_fold$data_split == "validation")
+    pred_obs <- sum(parcelles_data_fold$data_split == "predict")
+    
+    if (verbose) {
+      cat("    • Training:", train_obs, "\n")
+      cat("    • Validation:", val_obs, "\n")
+      cat("    • To predict:", pred_obs, "\n")
+    }
+    
+    # Prepare INLA data
+    df_inla <- parcelles_data_fold %>%
+      st_drop_geometry() %>%
+      left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+      left_join(year_map, by = "Year") %>%
+      mutate(
+        Y = case_when(
+          data_split == "train" ~ .data[[variable_name]],
+          TRUE ~ NA_real_
+        ),
+        Y_true = .data[[variable_name]],
+        ID.Field = Sequential_ID,
+        ID.Year = as.integer(ID.Year),
+        Month = as.integer(ifelse(is.na(Month), 6, Month)),
+        Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+        Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+        irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+      ) %>%
+      filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+      arrange(ID.Field, ID.Year)
+    
+    if (max(df_inla$ID.Field) > nrow(W_matrix)) {
+      if (verbose) cat("    ❌ Spatial structure incompatible. Skipping fold.\n")
+      next
+    }
+    
+    # Fit model
+    fit_result <- tryCatch({
+      prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+      
+      inla(
+        Y ~ 1 + Bloc + irrg_ty +
+          f(ID.Field, model = "besag", graph = W_matrix,
+            group = ID.Year, 
+            control.group = list(model = "ar1"),
+            hyper = list(prec = prec_prior),
+            constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+        control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      tryCatch({
+        inla(
+          Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE),
+          verbose = FALSE
+        )
+      }, error = function(e2) NULL)
+    })
+    
+    if (is.null(fit_result) || is.null(fit_result$summary.fitted.values)) {
+      if (verbose) cat("    ❌ Model fitting failed for fold", fold, "\n")
+      next
+    }
+    
+    # Extract predictions
+    predictions <- fit_result$summary.fitted.values
+    
+    df_predicted <- df_inla %>%
+      mutate(
+        fold = fold,
+        predicted = predictions$mean,
+        predicted_sd = predictions$sd,
+        predicted_lower = predictions$`0.025quant`,
+        predicted_upper = predictions$`0.975quant`
+      )
+    
+    all_fold_predictions[[fold]] <- df_predicted
+    
+    # Calculate fold-specific validation metrics
+    validation_data <- df_predicted %>%
+      filter(data_split == "validation", !is.na(Y_true), !is.na(predicted))
+    
+    if (nrow(validation_data) > 5) {
+      pred_vals <- validation_data$predicted
+      true_vals <- validation_data$Y_true
+      
+      ss_res <- sum((true_vals - pred_vals)^2)
+      ss_tot <- sum((true_vals - mean(true_vals))^2)
+      r_squared <- 1 - (ss_res / ss_tot)
+      
+      fold_metrics[[fold]] <- list(
+        fold = fold,
+        r_squared = r_squared,
+        correlation = cor(true_vals, pred_vals),
+        rmse = sqrt(mean((true_vals - pred_vals)^2)),
+        mae = mean(abs(true_vals - pred_vals)),
+        n_validation = nrow(validation_data)
+      )
+      
+      if (verbose) {
+        cat("    ✅ Fold", fold, "metrics: R²=", round(r_squared, 4), 
+            " RMSE=", round(fold_metrics[[fold]]$rmse, 4), "\n")
+      }
+    }
+  }
+  
+  # Combine all fold predictions
+  if (length(all_fold_predictions) == 0) {
+    if (verbose) cat("❌ No successful folds\n")
+    return(NULL)
+  }
+  
+  combined_predictions <- bind_rows(all_fold_predictions)
+  
+  # Calculate aggregated CV metrics
+  all_validation <- combined_predictions %>%
+    filter(data_split == "validation", !is.na(Y_true), !is.na(predicted))
+  
+  cv_metrics <- list(variable = variable_name)
+  
+  if (nrow(all_validation) > 5) {
+    pred_vals <- all_validation$predicted
+    true_vals <- all_validation$Y_true
+    
+    ss_res <- sum((true_vals - pred_vals)^2)
+    ss_tot <- sum((true_vals - mean(true_vals))^2)
+    
+    cv_metrics$cv_r_squared = 1 - (ss_res / ss_tot)
+    cv_metrics$cv_correlation = cor(true_vals, pred_vals)
+    cv_metrics$cv_rmse = sqrt(mean((true_vals - pred_vals)^2))
+    cv_metrics$cv_mae = mean(abs(true_vals - pred_vals))
+    cv_metrics$n_total_validation = nrow(all_validation)
+    
+    # Calculate per-fold statistics
+    fold_r2_values <- sapply(fold_metrics, function(x) x$r_squared)
+    cv_metrics$mean_fold_r_squared = mean(fold_r2_values, na.rm = TRUE)
+    cv_metrics$sd_fold_r_squared = sd(fold_r2_values, na.rm = TRUE)
+    
+    if (verbose) {
+      cat("\n  🎯 Cross-Validation Results (Aggregated):\n")
+      cat("    • Total validation obs:", cv_metrics$n_total_validation, "\n")
+      cat("    • CV R²:", round(cv_metrics$cv_r_squared, 4), "\n")
+      cat("    • Mean fold R² (±SD):", round(cv_metrics$mean_fold_r_squared, 4), 
+          "±", round(cv_metrics$sd_fold_r_squared, 4), "\n")
+      cat("    • CV RMSE:", round(cv_metrics$cv_rmse, 4), "\n")
+      cat("    • CV MAE:", round(cv_metrics$cv_mae, 4), "\n")
+    }
+  }
+  
+  # Fit final model on all data for predictions
+  if (verbose) cat("\n  🚀 Fitting final model on all data...\n")
+  
+  parcelles_data_final <- parcelles_data %>%
+    mutate(data_split = ifelse(is.na(.data[[variable_name]]), "predict", "train"))
+  
+  df_inla_final <- parcelles_data_final %>%
+    st_drop_geometry() %>%
+    left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+    left_join(year_map, by = "Year") %>%
+    mutate(
+      Y = case_when(
+        data_split == "train" ~ .data[[variable_name]],
+        TRUE ~ NA_real_
+      ),
+      ID.Field = Sequential_ID,
+      ID.Year = as.integer(ID.Year),
+      Month = as.integer(ifelse(is.na(Month), 6, Month)),
+      Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+      Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+      irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+    ) %>%
+    filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+    arrange(ID.Field, ID.Year)
+  
+  fit_final <- tryCatch({
+    prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+    
+    inla(
+      Y ~ 1 + Bloc + irrg_ty +
+        f(ID.Field, model = "besag", graph = W_matrix,
+          group = ID.Year, 
+          control.group = list(model = "ar1"),
+          hyper = list(prec = prec_prior),
+          constr = TRUE),
+      data = df_inla_final,
+      family = "gaussian",
+      control.predictor = list(compute = TRUE, link = 1),
+      control.compute = list(dic = TRUE, waic = TRUE),
+      control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+      verbose = FALSE
+    )
+  }, error = function(e) NULL)
+  
+  if (is.null(fit_final)) {
+    if (verbose) cat("  ❌ Final model fitting failed\n")
+    return(NULL)
+  }
+  
+  predictions_final <- fit_final$summary.fitted.values
+  
+  df_predicted_final <- df_inla_final %>%
+    mutate(
+      !!paste0(variable_name, "_predicted") := predictions_final$mean,
+      !!paste0(variable_name, "_predicted_sd") := predictions_final$sd,
+      !!paste0(variable_name, "_predicted_lower") := predictions_final$`0.025quant`,
+      !!paste0(variable_name, "_predicted_upper") := predictions_final$`0.975quant`,
+      !!paste0(variable_name, "_complete") := case_when(
+        data_split == "train" ~ Y,
+        TRUE ~ predictions_final$mean
+      ),
+      !!paste0(variable_name, "_prediction_type") := ifelse(data_split == "train", "Observed", "Predicted")
+    )
+  
+  result <- list(
+    variable_name = variable_name,
+    model_fit = fit_final,
+    predictions = df_predicted_final,
+    cv_predictions = combined_predictions,
+    cv_metrics = cv_metrics,
+    fold_metrics = fold_metrics,
+    n_total = n_total,
+    n_available = n_available,
+    n_missing = n_missing,
+    pct_available = pct_available
+  )
+  
+  return(result)
+}
+
+# Compositional imputation with 5-fold CV
+impute_compositional_granulometry_cv <- function(parcelles_data, W_matrix, field_map, year_map, 
+                                                 cv_folds, n_folds = 5, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING COMPOSITIONAL GRANULOMETRY (ILR) WITH 5-FOLD CV\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  parcelles_data <- parcelles_data %>%
+    mutate(obs_id = row_number())
+  
+  sampled_obs <- parcelles_data %>%
+    filter(has_complete_granulo)
+  
+  unsampled_obs <- parcelles_data %>%
+    filter(!has_complete_granulo)
+  
+  n_sampled <- nrow(sampled_obs)
+  n_unsampled <- nrow(unsampled_obs)
+  
+  if (verbose) {
+    cat("• Sampled observations:", n_sampled, "\n")
+    cat("• Unsampled observations:", n_unsampled, "\n")
+  }
+  
+  if (n_sampled < 30) {
+    if (verbose) cat("❌ Insufficient sampled observations\n")
+    return(NULL)
+  }
+  
+  # Prepare compositional data and ILR transform
+  comp_matrix <- sampled_obs %>%
+    st_drop_geometry() %>%
+    dplyr::select(all_of(GRANULO_FRACTIONS)) %>%
+    as.matrix()
+  
+  comp_matrix[comp_matrix <= 0] <- 0.01
+  row_sums <- rowSums(comp_matrix)
+  comp_matrix <- comp_matrix / row_sums * 100
+  
+  ilr_coords <- ilr_transform(comp_matrix / 100)
+  colnames(ilr_coords) <- paste0("ILR_", 1:4)
+  
+  if (verbose) {
+    cat("✅ ILR transformation: 5 fractions -> 4 orthonormal coordinates\n")
+  }
+  
+  sampled_obs_ilr <- sampled_obs %>%
+    bind_cols(as.data.frame(ilr_coords))
+  
+  # Process each ILR coordinate with CV
+  ilr_cv_results <- list()
+  
+  for (i in 1:4) {
+    ilr_var <- paste0("ILR_", i)
+    
+    if (verbose) cat("\n  🔄 Processing", ilr_var, "with 5-fold CV...\n")
+    
+    all_fold_predictions <- list()
+    fold_metrics <- list()
+    
+    # CV loop
+    for (fold in 1:n_folds) {
+      if (verbose) cat("    Fold", fold, "/", n_folds, "... ")
+      
+      sampled_obs_fold <- sampled_obs_ilr %>%
+        left_join(cv_folds, by = "Final_Cleaned_ID") %>%
+        mutate(
+          data_split = case_when(
+            cv_fold == fold ~ "validation",
+            TRUE ~ "train"
+          )
+        )
+      
+      all_obs_fold <- bind_rows(
+        sampled_obs_fold %>% mutate(obs_type = "sampled"),
+        unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+      )
+      
+      df_inla <- all_obs_fold %>%
+        st_drop_geometry() %>%
+        left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+        left_join(year_map, by = "Year") %>%
+        mutate(
+          Y = case_when(
+            data_split == "train" ~ .data[[ilr_var]],
+            TRUE ~ NA_real_
+          ),
+          Y_true = .data[[ilr_var]],
+          ID.Field = Sequential_ID,
+          ID.Year = as.integer(ID.Year),
+          Month = as.integer(ifelse(is.na(Month), 6, Month)),
+          Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+          irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+        ) %>%
+        filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+        arrange(ID.Field, ID.Year)
+      
+      fit_result <- tryCatch({
+        prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+        
+        inla(
+          Y ~ 1 + Bloc + irrg_ty +
+            f(ID.Field, model = "besag", graph = W_matrix,
+              group = ID.Year, 
+              control.group = list(model = "ar1"),
+              hyper = list(prec = prec_prior),
+              constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE, waic = TRUE),
+          control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+          verbose = FALSE
+        )
+      }, error = function(e) NULL)
+      
+      if (!is.null(fit_result)) {
+        predictions <- fit_result$summary.fitted.values
+        
+        df_predicted <- df_inla %>%
+          mutate(
+            fold = fold,
+            predicted = predictions$mean,
+            predicted_sd = predictions$sd
+          )
+        
+        all_fold_predictions[[fold]] <- df_predicted
+        
+        # Validation metrics
+        val_data <- df_predicted %>%
+          filter(data_split == "validation", !is.na(Y_true))
+        
+        if (nrow(val_data) > 5) {
+          pred_vals <- val_data$predicted
+          true_vals <- val_data$Y_true
+          
+          ss_res <- sum((true_vals - pred_vals)^2)
+          ss_tot <- sum((true_vals - mean(true_vals))^2)
+          
+          fold_metrics[[fold]] <- list(
+            fold = fold,
+            r_squared = 1 - (ss_res / ss_tot),
+            rmse = sqrt(mean((true_vals - pred_vals)^2)),
+            n_val = nrow(val_data)
+          )
+          
+          if (verbose) cat("R²=", round(fold_metrics[[fold]]$r_squared, 3), "\n")
+        } else {
+          if (verbose) cat("insufficient data\n")
+        }
+      } else {
+        if (verbose) cat("failed\n")
+      }
+    }
+    
+    # Aggregate CV results for this ILR coordinate
+    if (length(all_fold_predictions) > 0) {
+      combined_predictions <- bind_rows(all_fold_predictions)
+      
+      all_validation <- combined_predictions %>%
+        filter(data_split == "validation", !is.na(Y_true))
+      
+      cv_metrics_ilr <- list()
+      if (nrow(all_validation) > 5) {
+        pred_vals <- all_validation$predicted
+        true_vals <- all_validation$Y_true
+        
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        cv_metrics_ilr$cv_r_squared = 1 - (ss_res / ss_tot)
+        cv_metrics_ilr$cv_rmse = sqrt(mean((true_vals - pred_vals)^2))
+        cv_metrics_ilr$n_val = nrow(all_validation)
+        
+        fold_r2 <- sapply(fold_metrics, function(x) x$r_squared)
+        cv_metrics_ilr$mean_fold_r_squared = mean(fold_r2, na.rm = TRUE)
+        cv_metrics_ilr$sd_fold_r_squared = sd(fold_r2, na.rm = TRUE)
+      }
+      
+      # Fit final model on all data
+      all_obs_final <- bind_rows(
+        sampled_obs_ilr %>% mutate(obs_type = "sampled", data_split = "train"),
+        unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+      )
+      
+      df_inla_final <- all_obs_final %>%
+        st_drop_geometry() %>%
+        left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+        left_join(year_map, by = "Year") %>%
+        mutate(
+          Y = case_when(
+            data_split == "train" ~ .data[[ilr_var]],
+            TRUE ~ NA_real_
+          ),
+          ID.Field = Sequential_ID,
+          ID.Year = as.integer(ID.Year),
+          Month = as.integer(ifelse(is.na(Month), 6, Month)),
+          Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+          irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+        ) %>%
+        filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+        arrange(ID.Field, ID.Year)
+      
+      fit_final <- tryCatch({
+        prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+        
+        inla(
+          Y ~ 1 + Bloc + irrg_ty +
+            f(ID.Field, model = "besag", graph = W_matrix,
+              group = ID.Year, 
+              control.group = list(model = "ar1"),
+              hyper = list(prec = prec_prior),
+              constr = TRUE),
+          data = df_inla_final,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE),
+          verbose = FALSE
+        )
+      }, error = function(e) NULL)
+      
+      if (!is.null(fit_final)) {
+        predictions_final <- fit_final$summary.fitted.values
+        
+        df_predicted_final <- df_inla_final %>%
+          mutate(
+            !!paste0(ilr_var, "_predicted") := predictions_final$mean,
+            !!paste0(ilr_var, "_predicted_sd") := predictions_final$sd
+          )
+        
+        ilr_cv_results[[ilr_var]] <- list(
+          model = fit_final,
+          predictions = df_predicted_final,
+          cv_predictions = combined_predictions,
+          cv_metrics = cv_metrics_ilr,
+          fold_metrics = fold_metrics
+        )
+        
+        if (verbose && !is.null(cv_metrics_ilr$cv_r_squared)) {
+          cat("    ✅ CV R²:", round(cv_metrics_ilr$cv_r_squared, 4), 
+              "± SD:", round(cv_metrics_ilr$sd_fold_r_squared, 4), "\n")
+        }
+      }
+    }
+  }
+  
+  if (length(ilr_cv_results) != 4) {
+    if (verbose) cat("❌ Not all ILR coordinates fitted successfully\n")
+    return(NULL)
+  }
+  
+  # Transform back to composition
+  if (verbose) cat("\n🔄 Transforming back to composition...\n")
+  
+  all_predictions <- ilr_cv_results[[1]]$predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, data_split, obs_type,
+                  ILR_1_predicted, ILR_1_predicted_sd)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    pred_cols <- ilr_cv_results[[ilr_var]]$predictions %>%
+      dplyr::select(obs_id, !!paste0(ilr_var, "_predicted"), !!paste0(ilr_var, "_predicted_sd"))
+    
+    all_predictions <- all_predictions %>%
+      left_join(pred_cols, by = "obs_id")
+  }
+  
+  ilr_pred_matrix <- all_predictions %>%
+    dplyr::select(ILR_1_predicted, ILR_2_predicted, ILR_3_predicted, ILR_4_predicted) %>%
+    as.matrix()
+  
+  comp_predicted <- ilr_inverse(ilr_pred_matrix)
+  comp_predicted_pct <- comp_predicted * 100
+  colnames(comp_predicted_pct) <- GRANULO_FRACTIONS
+  
+  if (verbose) {
+    cat("✅ ILR back-transformation complete\n")
+    sums_check <- rowSums(comp_predicted_pct)
+    cat("• Sum range:", round(min(sums_check), 2), "to", round(max(sums_check), 2), "%\n")
+  }
+  
+  final_results <- all_predictions %>%
+    bind_cols(as.data.frame(comp_predicted_pct) %>%
+                rename_with(~paste0(., "_predicted"), all_of(GRANULO_FRACTIONS)))
+  
+  for (frac in GRANULO_FRACTIONS) {
+    original_map <- bind_rows(sampled_obs_ilr, unsampled_obs) %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(original_value = !!frac)
+    
+    final_results <- final_results %>%
+      left_join(original_map, by = "obs_id")
+    
+    pred_col <- paste0(frac, "_predicted")
+    
+    final_results[[paste0(frac, "_complete")]] <- ifelse(
+      final_results$data_split == "train",
+      final_results$original_value,
+      final_results[[pred_col]]
+    )
+    
+    final_results[[paste0(frac, "_prediction_type")]] <- final_results$data_split
+    
+    final_results <- final_results %>% dplyr::select(-original_value)
+  }
+  
+  # Calculate CV metrics for fractions
+  cv_frac_metrics <- list()
+  
+  # Get CV predictions for all ILR coordinates
+  all_ilr_cv <- ilr_cv_results[[1]]$cv_predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, fold, data_split, ILR_1 = predicted)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    cv_cols <- ilr_cv_results[[ilr_var]]$cv_predictions %>%
+      dplyr::select(obs_id, fold, !!paste0("ILR_", i) := predicted)
+    
+    all_ilr_cv <- all_ilr_cv %>%
+      left_join(cv_cols, by = c("obs_id", "fold"))
+  }
+  
+  # Transform CV predictions back to composition
+  ilr_cv_matrix <- all_ilr_cv %>%
+    dplyr::select(ILR_1, ILR_2, ILR_3, ILR_4) %>%
+    as.matrix()
+  
+  comp_cv_predicted <- ilr_inverse(ilr_cv_matrix)
+  comp_cv_predicted_pct <- comp_cv_predicted * 100
+  colnames(comp_cv_predicted_pct) <- GRANULO_FRACTIONS
+  
+  cv_predictions_fractions <- all_ilr_cv %>%
+    bind_cols(as.data.frame(comp_cv_predicted_pct))
+  
+  # Calculate metrics for each fraction
+  for (frac in GRANULO_FRACTIONS) {
+    true_map <- sampled_obs_ilr %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(true_val = !!frac)
+    
+    cv_comparison <- cv_predictions_fractions %>%
+      filter(data_split == "validation") %>%
+      left_join(true_map, by = "obs_id")
+    
+    if (sum(!is.na(cv_comparison$true_val)) > 5) {
+      true_vals <- cv_comparison$true_val
+      pred_vals <- cv_comparison[[frac]]
+      
+      valid_idx <- !is.na(true_vals) & !is.na(pred_vals)
+      true_vals <- true_vals[valid_idx]
+      pred_vals <- pred_vals[valid_idx]
+      
+      if (length(true_vals) > 0) {
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        cv_frac_metrics[[frac]] <- list(
+          cv_r_squared = 1 - (ss_res / ss_tot),
+          cv_rmse = sqrt(mean((true_vals - pred_vals)^2)),
+          cv_mae = mean(abs(true_vals - pred_vals)),
+          n = length(true_vals)
+        )
+      }
+    }
+  }
+  
+  overall_metrics <- list(
+    fraction_metrics = cv_frac_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  )
+  
+  if (verbose) {
+    cat("\n🎯 Cross-Validation Results (Back-transformed Fractions):\n")
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(cv_frac_metrics[[frac]])) {
+        cat("• ", frac, ": CV R²=", round(cv_frac_metrics[[frac]]$cv_r_squared, 4),
+            " RMSE=", round(cv_frac_metrics[[frac]]$cv_rmse, 2), "% (n=", 
+            cv_frac_metrics[[frac]]$n, ")\n", sep="")
+      }
+    }
+  }
+  
+  return(list(
+    predictions = final_results,
+    cv_predictions = cv_predictions_fractions,
+    ilr_results = ilr_cv_results,
+    metrics = overall_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  ))
+}
+
+# ============================================================================
+# STEP 7: CREATE CV FOLDS
+# ============================================================================
+cat("\n🎲 CREATING 5-FOLD CROSS-VALIDATION SPLITS:\n")
+cat("=", rep("=", 45), "\n", sep="")
+
+# Create CV folds based on unique parcels
+unique_parcels_with_data <- parcelles_complete %>%
+  st_drop_geometry() %>%
+  filter(!is.na(pH) | has_complete_granulo) %>%
+  dplyr::select(Final_Cleaned_ID) %>%
+  distinct() %>%
+  pull(Final_Cleaned_ID)
+
+cv_fold_assignment <- create_cv_folds(unique_parcels_with_data, n_folds = 5, seed = 123)
+
+cat("• Total unique parcels with data:", length(unique_parcels_with_data), "\n")
+cat("• Parcels per fold:\n")
+for (fold in 1:5) {
+  n_parcels <- sum(cv_fold_assignment$cv_fold == fold)
+  cat("  Fold", fold, ":", n_parcels, "parcels\n")
+}
+
+# ============================================================================
+# STEP 8: PROCESS ALL VARIABLES WITH CV
+# ============================================================================
+cat("\n🔄 PROCESSING ALL VARIABLES WITH 5-FOLD CV:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+all_results <- list()
+all_metrics <- data.frame()
+failed_variables <- character(0)
+
+# Process compositional granulometry
+cat("\n[COMPOSITIONAL] Processing granulometry fractions with CV...\n")
+
+granulo_result <- impute_compositional_granulometry_cv(
+  parcelles_data = parcelles_complete,
+  W_matrix = W.P1_complete,
+  field_map = field_mapping,
+  year_map = year_mapping,
+  cv_folds = cv_fold_assignment,
+  n_folds = 5,
+  verbose = TRUE
+)
+
+if (!is.null(granulo_result)) {
+  all_results[["Granulometry_Compositional"]] <- granulo_result
+  
+  if (!is.null(granulo_result$metrics$fraction_metrics)) {
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(granulo_result$metrics$fraction_metrics[[frac]])) {
+        metrics_row <- data.frame(
+          Variable = frac,
+          N_Total = nrow(parcelles_complete),
+          N_Available = granulo_result$n_sampled,
+          N_Missing = granulo_result$n_unsampled,
+          Pct_Available = round(granulo_result$n_sampled / nrow(parcelles_complete) * 100, 1),
+          CV_R_Squared = granulo_result$metrics$fraction_metrics[[frac]]$cv_r_squared,
+          CV_RMSE = granulo_result$metrics$fraction_metrics[[frac]]$cv_rmse,
+          CV_MAE = granulo_result$metrics$fraction_metrics[[frac]]$cv_mae,
+          N_CV_Validation = granulo_result$metrics$fraction_metrics[[frac]]$n,
+          stringsAsFactors = FALSE
+        )
+        
+        all_metrics <- rbind(all_metrics, metrics_row)
+      }
+    }
+  }
+  cat("✅ SUCCESS for compositional granulometry\n")
+} else {
+  failed_variables <- c(failed_variables, GRANULO_FRACTIONS)
+  cat("❌ FAILED for compositional granulometry\n")
+}
+
+# Process non-compositional variables
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+  
+  result <- impute_single_variable_cv(
+    variable_name = var_name,
+    parcelles_data = parcelles_complete,
+    W_matrix = W.P1_complete,
+    field_map = field_mapping,
+    year_map = year_mapping,
+    cv_folds = cv_fold_assignment,
+    n_folds = 5,
+    verbose = TRUE
+  )
+  
+  if (!is.null(result)) {
+    all_results[[var_name]] <- result
+    
+    metrics_row <- data.frame(
+      Variable = var_name,
+      N_Total = result$n_total,
+      N_Available = result$n_available,
+      N_Missing = result$n_missing,
+      Pct_Available = result$pct_available,
+      CV_R_Squared = ifelse(is.null(result$cv_metrics$cv_r_squared), NA, result$cv_metrics$cv_r_squared),
+      CV_RMSE = ifelse(is.null(result$cv_metrics$cv_rmse), NA, result$cv_metrics$cv_rmse),
+      CV_MAE = ifelse(is.null(result$cv_metrics$cv_mae), NA, result$cv_metrics$cv_mae),
+      N_CV_Validation = ifelse(is.null(result$cv_metrics$n_total_validation), 0, result$cv_metrics$n_total_validation),
+      Mean_Fold_R_Squared = ifelse(is.null(result$cv_metrics$mean_fold_r_squared), NA, result$cv_metrics$mean_fold_r_squared),
+      SD_Fold_R_Squared = ifelse(is.null(result$cv_metrics$sd_fold_r_squared), NA, result$cv_metrics$sd_fold_r_squared),
+      stringsAsFactors = FALSE
+    )
+    
+    all_metrics <- rbind(all_metrics, metrics_row)
+    cat("✅ SUCCESS for", var_name, "\n")
+  } else {
+    failed_variables <- c(failed_variables, var_name)
+    cat("❌ FAILED for", var_name, "\n")
+  }
+}
+
+# ============================================================================
+# STEP 9: COMBINE ALL PREDICTIONS
+# ============================================================================
+cat("\n🔗 COMBINING ALL PREDICTIONS:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+successful_variables <- names(all_results)
+cat("Successfully processed:", length(successful_variables), "variable groups\n")
+
+final_dataset <- parcelles_complete %>% 
+  st_drop_geometry() %>%
+  group_by(Final_Cleaned_ID, Year) %>%
+  mutate(
+    replicate_id = row_number(),
+    unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+  ) %>%
+  ungroup() %>%
+  mutate(original_row_id = row_number())
+
+final_dataset <- parcelles_complete %>%
+  mutate(original_row_id = row_number()) %>%
+  left_join(
+    final_dataset %>% dplyr::select(original_row_id, replicate_id, unique_key),
+    by = "original_row_id"
+  )
+
+# Add CV fold assignment
+final_dataset <- final_dataset %>%
+  left_join(cv_fold_assignment, by = "Final_Cleaned_ID")
+
+# Add granulometry predictions
+if ("Granulometry_Compositional" %in% names(all_results)) {
+  cat("\n[COMPOSITIONAL] Adding granulometry predictions...\n")
+  
+  final_dataset <- final_dataset %>%
+    mutate(obs_id = row_number())
+  
+  granulo_preds <- all_results[["Granulometry_Compositional"]]$predictions
+  
+  final_dataset <- final_dataset %>%
+    left_join(
+      granulo_preds %>% 
+        dplyr::select(obs_id, matches("^Clay_|^Fine_Silt_|^Coarse_Silt_|^Fine_Sand_|^Coarse_Sand_|^ILR_")),
+      by = "obs_id"
+    )
+  
+  final_dataset <- final_dataset %>% dplyr::select(-obs_id)
+  cat("  ✅ Compositional predictions added\n")
+}
+
+# Add non-compositional predictions
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  if (var_name %in% names(all_results)) {
+    cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Adding:", var_name, "\n")
+    
+    result <- all_results[[var_name]]
+    
+    df_inla_reference <- parcelles_complete %>% 
+      st_drop_geometry() %>% 
+      left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID"), 
+                relationship = "many-to-one") %>%  
+      left_join(year_mapping, by = "Year", 
+                relationship = "many-to-one") %>%  
+      filter(!is.na(Sequential_ID), !is.na(ID.Year)) %>% 
+      group_by(Final_Cleaned_ID, Year) %>%
+      mutate(
+        replicate_id = row_number(),
+        unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+      ) %>%
+      ungroup() %>%
+      mutate(original_row_id = row_number()) %>% 
+      arrange(Sequential_ID, ID.Year, replicate_id) %>%
+      mutate(inla_row_id = row_number())
+    
+    if (nrow(df_inla_reference) == nrow(result$predictions)) {
+      predictions_aligned <- df_inla_reference %>% 
+        dplyr::select(Final_Cleaned_ID, Year, replicate_id, unique_key, original_row_id) %>% 
+        bind_cols(
+          result$predictions %>% 
+            dplyr::select(matches(paste0("^", var_name, "_")))
+        )
+      
+      final_dataset <- final_dataset %>% 
+        left_join(
+          predictions_aligned %>% dplyr::select(-Final_Cleaned_ID, -Year, -replicate_id, -original_row_id),
+          by = "unique_key"
+        )
+      
+      first_pred_col <- paste0(var_name, "_predicted")
+      if (first_pred_col %in% colnames(final_dataset)) {
+        non_null_count <- sum(!is.na(final_dataset[[first_pred_col]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+      }
+    }
+    
+    gc()
+  }
+}
+
+final_dataset <- final_dataset %>% 
+  dplyr::select(-original_row_id)
+
+cat("\n✅ Final combined dataset created\n")
+cat("• Total observations:", nrow(final_dataset), "\n")
+cat("• Total columns:", ncol(final_dataset), "\n")
+
+gc()
+
+# ============================================================================
+# STEP 10: SAVE COMPREHENSIVE OUTPUTS
+# ============================================================================
+cat("\n💾 SAVING COMPREHENSIVE OUTPUTS:\n")
+cat("=", rep("=", 35), "\n", sep="")
+
+base_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/"
+
+gpkg_output <- paste0(base_path, "parcels_ALL_VARIABLES_CV_predictions.gpkg")
+st_write(final_dataset, gpkg_output, delete_dsn = TRUE, quiet = TRUE)
+cat("✅ Complete dataset saved:", basename(gpkg_output), "\n")
+
+csv_output <- paste0(base_path, "parcels_ALL_VARIABLES_CV_attributes.csv")
+st_drop_geometry(final_dataset) %>% write_csv(csv_output)
+cat("✅ Attributes saved:", basename(csv_output), "\n")
+
+metrics_output <- paste0(base_path, "ALL_VARIABLES_CV_metrics_summary.csv")
+write_csv(all_metrics, metrics_output)
+cat("✅ CV metrics summary saved:", basename(metrics_output), "\n")
+
+# Save CV fold assignment
+cv_folds_output <- paste0(base_path, "CV_fold_assignment.csv")
+write_csv(cv_fold_assignment, cv_folds_output)
+cat("✅ CV fold assignment saved:", basename(cv_folds_output), "\n")
+```
+
+## I.2. MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH 5-FOLD CROSS-VALIDATION \[PARALLEL COMPUTING VERSION\]
+
+```{r}
+# ============================================================================
+# MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH 5-FOLD CROSS-VALIDATION
+# PARALLEL COMPUTING VERSION
+# Compositional treatment for granulometry fractions
+# ============================================================================
+
+library(sf)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(spdep)
+library(readr)
+library(purrr)
+library(tibble)
+library(foreach)
+library(doParallel)
+library(parallel)
+
+cat("========================================\n")
+cat("  MULTI-VARIABLE SPATIO-TEMPORAL       \n")
+cat("  IMPUTATION WITH 5-FOLD CV            \n")
+cat("  PARALLEL COMPUTING ENABLED           \n")
+cat("========================================\n")
+
+# ============================================================================
+# STEP 0: SETUP PARALLEL COMPUTING
+# ============================================================================
+cat("\n🚀 SETTING UP PARALLEL COMPUTING:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+# Detect number of cores
+n_cores_available <- detectCores()
+# Use 75% of available cores (leave some for system)
+n_cores_to_use <- max(1, floor(n_cores_available * 0.75))
+
+cat("• Available CPU cores:", n_cores_available, "\n")
+cat("• Cores to use for parallel processing:", n_cores_to_use, "\n")
+
+# Register parallel backend
+cl <- makeCluster(n_cores_to_use)
+registerDoParallel(cl)
+
+cat("✅ Parallel backend registered\n")
+
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET AND IDENTIFY SOIL VARIABLES
+# ============================================================================
+cat("\n📂 LOADING COMPLETE DATASET AND IDENTIFYING SOIL VARIABLES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_complete.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stopCluster(cl)
+  stop("Dataset not available")
+}
+
+# Define compositional and non-compositional variables
+GRANULO_FRACTIONS <- c(
+  "Clay_percent",
+  "Fine_Silt_percent",
+  "Coarse_Silt_percent",
+  "Fine_Sand_percent",
+  "Coarse_Sand_percent"
+)
+
+NON_COMPOSITIONAL_VARIABLES <- c(
+  "pH",
+  "CN_Ratio", 
+  "Electrical_Conductivity_mmho_cm",
+  "Exchangeable_Calcium_meq_100g",
+  "Exchangeable_Magnesium_meq_100g", 
+  "Exchangeable_Sodium_meq_100g",
+  "Exchangeable_Potassium_meq_100g",
+  "Available_P2O5_mg_kg",
+  "Organic_Carbon_per_mille",
+  "Total_Nitrogen_per_mille",
+  "Total_Silt_percent",
+  "Total_Sand_percent", 
+  "Organic_Matter_percent",
+  "Sum_of_Exchangeable_Bases_meq_100g",
+  "CaO_g_100g",
+  "Mg_Ca_Ratio",
+  "Mg_K_Ratio",
+  "Compaction_Index"
+)
+
+cat("Compositional variables (granulometry):", length(GRANULO_FRACTIONS), "\n")
+cat("Non-compositional variables:", length(NON_COMPOSITIONAL_VARIABLES), "\n")
+
+for (i in seq_along(GRANULO_FRACTIONS)) {
+  var_name <- GRANULO_FRACTIONS[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              length(GRANULO_FRACTIONS) + i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+cat("\nDataset structure:\n")
+cat("• Total observations:", nrow(parcelles_complete), "\n")
+cat("• Unique parcels:", length(unique(parcelles_complete$Final_Cleaned_ID)), "\n")
+cat("• Year range:", min(parcelles_complete$Year, na.rm = TRUE), "-", max(parcelles_complete$Year, na.rm = TRUE), "\n")
+
+# Validate compositional data
+parcelles_complete <- parcelles_complete %>%
+  mutate(
+    has_complete_granulo = !is.na(Clay_percent) & 
+                          !is.na(Fine_Silt_percent) & 
+                          !is.na(Coarse_Silt_percent) & 
+                          !is.na(Fine_Sand_percent) & 
+                          !is.na(Coarse_Sand_percent),
+    granulo_sum = Clay_percent + Fine_Silt_percent + Coarse_Silt_percent + 
+                  Fine_Sand_percent + Coarse_Sand_percent
+  )
+
+complete_granulo <- sum(parcelles_complete$has_complete_granulo, na.rm = TRUE)
+cat("\n🔍 COMPOSITIONAL DATA VALIDATION:\n")
+cat("• Observations with complete granulometry:", complete_granulo, "\n")
+
+if(complete_granulo > 0) {
+  sum_stats <- parcelles_complete %>%
+    filter(has_complete_granulo) %>%
+    pull(granulo_sum) %>%
+    summary()
+  cat("• Sum range:", round(sum_stats[1], 2), "to", round(sum_stats[6], 2), "%\n")
+}
+
+# ============================================================================
+# STEP 2: PREPARE SHARED SPATIAL STRUCTURE
+# ============================================================================
+cat("\n🗺️ PREPARING SHARED SPATIAL STRUCTURE:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+unique_parcels_spatial <- parcelles_complete %>%
+  group_by(Final_Cleaned_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(Final_Cleaned_ID)
+
+cat("Unique parcels for spatial analysis:", nrow(unique_parcels_spatial), "\n")
+
+unique_parcels_spatial <- st_make_valid(unique_parcels_spatial)
+cat("Geometries validated\n")
+
+field_mapping <- data.frame(
+  Original_ID = unique_parcels_spatial$Final_Cleaned_ID,
+  Sequential_ID = 1:nrow(unique_parcels_spatial)
+)
+
+cat("Field mapping created: 1 to", nrow(field_mapping), "\n")
+
+unique_parcels_spatial <- unique_parcels_spatial %>%
+  left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+  arrange(Sequential_ID)
+
+# ============================================================================
+# STEP 3: CREATE SPATIAL WEIGHTS MATRIX W.P1
+# ============================================================================
+cat("\n🔗 CREATING SHARED SPATIAL WEIGHTS MATRIX:\n")
+cat("=", rep("=", 42), "\n", sep="")
+
+cat("Computing boundary-to-boundary distances (this may take time)...\n")
+
+boundaries <- st_boundary(unique_parcels_spatial)
+dist_matrix <- st_distance(boundaries, boundaries)
+dist_matrix <- units::drop_units(dist_matrix)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated:", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+
+DISTANCE_THRESHOLD <- 110
+cat("Using distance threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+W.P1_complete <- matrix(0, nrow = nrow(unique_parcels_spatial), ncol = nrow(unique_parcels_spatial))
+W.P1_complete[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+diag(W.P1_complete) <- 0
+rownames(W.P1_complete) <- colnames(W.P1_complete) <- 1:nrow(W.P1_complete)
+
+n_connections <- sum(W.P1_complete)
+avg_neighbors <- n_connections / nrow(unique_parcels_spatial)
+
+cat("✅ W.P1 matrix created:\n")
+cat("• Dimensions:", nrow(W.P1_complete), "x", ncol(W.P1_complete), "\n")
+cat("• Total connections:", n_connections, "\n")
+cat("• Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+
+# ============================================================================
+# STEP 4: PREPARE SHARED TEMPORAL STRUCTURE
+# ============================================================================
+years_unique <- sort(unique(parcelles_complete$Year))
+n_years <- length(years_unique)
+year_mapping <- data.frame(
+  Year = years_unique,
+  ID.Year = 1:n_years
+)
+
+cat("Years mapped:", min(years_unique), "to", max(years_unique), "(", n_years, "years)\n")
+
+# ============================================================================
+# ILR TRANSFORMATION FUNCTIONS
+# ============================================================================
+
+create_ilr_basis <- function(D) {
+  V <- matrix(0, nrow = D - 1, ncol = D)
+  for (i in 1:(D - 1)) {
+    V[i, 1:i] <- 1/i
+    V[i, i + 1] <- -1
+    V[i, ] <- V[i, ] * sqrt(i / (i + 1))
+  }
+  return(V)
+}
+
+ilr_transform <- function(composition_matrix) {
+  D <- ncol(composition_matrix)
+  V <- create_ilr_basis(D)
+  log_comp <- log(composition_matrix)
+  ilr_coords <- log_comp %*% t(V)
+  return(ilr_coords)
+}
+
+ilr_inverse <- function(ilr_matrix) {
+  D <- ncol(ilr_matrix) + 1
+  V <- create_ilr_basis(D)
+  log_comp <- ilr_matrix %*% V
+  composition <- exp(log_comp)
+  row_sums <- rowSums(composition)
+  composition <- composition / row_sums
+  return(composition)
+}
+
+# ============================================================================
+# STEP 5: CREATE 5-FOLD CV SPLITS
+# ============================================================================
+
+create_cv_folds <- function(unique_ids, n_folds = 5, seed = 123) {
+  set.seed(seed)
+  n <- length(unique_ids)
+  fold_ids <- sample(rep(1:n_folds, length.out = n))
+  
+  fold_assignment <- data.frame(
+    Final_Cleaned_ID = unique_ids,
+    cv_fold = fold_ids
+  )
+  
+  return(fold_assignment)
+}
+
+# ============================================================================
+# STEP 6: DEFINE IMPUTATION FUNCTIONS WITH CV AND PARALLEL PROCESSING
+# ============================================================================
+
+# Non-compositional imputation with 5-fold CV (PARALLELIZED)
+impute_single_variable_cv_parallel <- function(variable_name, parcelles_data, W_matrix, 
+                                               field_map, year_map, cv_folds, n_folds = 5, 
+                                               verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING VARIABLE:", variable_name, "(PARALLEL)\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  var_values <- parcelles_data[[variable_name]]
+  n_total <- length(var_values)
+  n_available <- sum(!is.na(var_values))
+  n_missing <- n_total - n_available
+  pct_available <- round(n_available/n_total*100, 1)
+  
+  if (verbose) {
+    cat("Variable statistics:\n")
+    cat("• Total observations:", n_total, "\n")
+    cat("• Available (non-NA):", n_available, "(", pct_available, "%)\n")
+    cat("• Missing (NA):", n_missing, "(", round(n_missing/n_total*100, 1), "%)\n")
+    
+    if (n_available > 0) {
+      cat("• Min value:", round(min(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Max value:", round(max(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Mean value:", round(mean(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Std deviation:", round(sd(var_values, na.rm = TRUE), 3), "\n")
+    }
+  }
+  
+  if (n_available < 20) {
+    if (verbose) cat("❌ Insufficient data (< 20 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  # Export necessary objects to cluster
+  if (verbose) cat("  📤 Exporting data to parallel workers...\n")
+  
+  # PARALLEL LOOP THROUGH FOLDS
+  fold_results <- foreach(
+    fold = 1:n_folds,
+    .packages = c("sf", "INLA", "dplyr"),
+    .export = c("parcelles_data", "cv_folds", "variable_name", "field_map", "year_map", "W_matrix"),
+    .errorhandling = "pass",
+    .verbose = FALSE
+  ) %dopar% {
+    
+    # Assign train/validation based on current fold
+    parcelles_data_fold <- parcelles_data %>%
+      left_join(cv_folds, by = "Final_Cleaned_ID") %>%
+      mutate(
+        data_split = case_when(
+          is.na(.data[[variable_name]]) ~ "predict",
+          cv_fold == fold ~ "validation",
+          !is.na(.data[[variable_name]]) ~ "train",
+          TRUE ~ "predict"
+        )
+      )
+    
+    train_obs <- sum(parcelles_data_fold$data_split == "train")
+    val_obs <- sum(parcelles_data_fold$data_split == "validation")
+    pred_obs <- sum(parcelles_data_fold$data_split == "predict")
+    
+    # Prepare INLA data
+    df_inla <- parcelles_data_fold %>%
+      st_drop_geometry() %>%
+      left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+      left_join(year_map, by = "Year") %>%
+      mutate(
+        Y = case_when(
+          data_split == "train" ~ .data[[variable_name]],
+          TRUE ~ NA_real_
+        ),
+        Y_true = .data[[variable_name]],
+        ID.Field = Sequential_ID,
+        ID.Year = as.integer(ID.Year),
+        Month = as.integer(ifelse(is.na(Month), 6, Month)),
+        Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+        Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+        irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+      ) %>%
+      filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+      arrange(ID.Field, ID.Year)
+    
+    if (max(df_inla$ID.Field) > nrow(W_matrix)) {
+      return(list(success = FALSE, fold = fold, error = "Spatial structure incompatible"))
+    }
+    
+    # Fit model
+    fit_result <- tryCatch({
+      prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+      
+      inla(
+        Y ~ 1 + Bloc + irrg_ty +
+          f(ID.Field, model = "besag", graph = W_matrix,
+            group = ID.Year, 
+            control.group = list(model = "ar1"),
+            hyper = list(prec = prec_prior),
+            constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+        control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      tryCatch({
+        inla(
+          Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE),
+          verbose = FALSE
+        )
+      }, error = function(e2) NULL)
+    })
+    
+    if (is.null(fit_result) || is.null(fit_result$summary.fitted.values)) {
+      return(list(success = FALSE, fold = fold, error = "Model fitting failed"))
+    }
+    
+    # Extract predictions
+    predictions <- fit_result$summary.fitted.values
+    
+    df_predicted <- df_inla %>%
+      mutate(
+        fold = fold,
+        predicted = predictions$mean,
+        predicted_sd = predictions$sd,
+        predicted_lower = predictions$`0.025quant`,
+        predicted_upper = predictions$`0.975quant`
+      )
+    
+    # Calculate fold-specific validation metrics
+    validation_data <- df_predicted %>%
+      filter(data_split == "validation", !is.na(Y_true), !is.na(predicted))
+    
+    fold_metric <- NULL
+    if (nrow(validation_data) > 5) {
+      pred_vals <- validation_data$predicted
+      true_vals <- validation_data$Y_true
+      
+      ss_res <- sum((true_vals - pred_vals)^2)
+      ss_tot <- sum((true_vals - mean(true_vals))^2)
+      r_squared <- 1 - (ss_res / ss_tot)
+      
+      fold_metric <- list(
+        fold = fold,
+        r_squared = r_squared,
+        correlation = cor(true_vals, pred_vals),
+        rmse = sqrt(mean((true_vals - pred_vals)^2)),
+        mae = mean(abs(true_vals - pred_vals)),
+        n_validation = nrow(validation_data)
+      )
+    }
+    
+    return(list(
+      success = TRUE,
+      fold = fold,
+      predictions = df_predicted,
+      metrics = fold_metric,
+      train_obs = train_obs,
+      val_obs = val_obs,
+      pred_obs = pred_obs
+    ))
+  }
+  
+  # Process parallel results
+  if (verbose) cat("\n  📥 Processing parallel results...\n")
+  
+  all_fold_predictions <- list()
+  fold_metrics <- list()
+  
+  for (result in fold_results) {
+    if (is.list(result) && !is.null(result$success) && result$success) {
+      fold <- result$fold
+      all_fold_predictions[[fold]] <- result$predictions
+      if (!is.null(result$metrics)) {
+        fold_metrics[[fold]] <- result$metrics
+        if (verbose) {
+          cat("    ✅ Fold", fold, "metrics: R²=", round(result$metrics$r_squared, 4), 
+              " RMSE=", round(result$metrics$rmse, 4), "\n")
+        }
+      }
+    } else {
+      if (verbose) cat("    ❌ Fold", result$fold, "failed:", result$error, "\n")
+    }
+  }
+  
+  # Combine all fold predictions
+  if (length(all_fold_predictions) == 0) {
+    if (verbose) cat("❌ No successful folds\n")
+    return(NULL)
+  }
+  
+  combined_predictions <- bind_rows(all_fold_predictions)
+  
+  # Calculate aggregated CV metrics
+  all_validation <- combined_predictions %>%
+    filter(data_split == "validation", !is.na(Y_true), !is.na(predicted))
+  
+  cv_metrics <- list(variable = variable_name)
+  
+  if (nrow(all_validation) > 5) {
+    pred_vals <- all_validation$predicted
+    true_vals <- all_validation$Y_true
+    
+    ss_res <- sum((true_vals - pred_vals)^2)
+    ss_tot <- sum((true_vals - mean(true_vals))^2)
+    
+    cv_metrics$cv_r_squared = 1 - (ss_res / ss_tot)
+    cv_metrics$cv_correlation = cor(true_vals, pred_vals)
+    cv_metrics$cv_rmse = sqrt(mean((true_vals - pred_vals)^2))
+    cv_metrics$cv_mae = mean(abs(true_vals - pred_vals))
+    cv_metrics$n_total_validation = nrow(all_validation)
+    
+    # Calculate per-fold statistics
+    fold_r2_values <- sapply(fold_metrics, function(x) x$r_squared)
+    cv_metrics$mean_fold_r_squared = mean(fold_r2_values, na.rm = TRUE)
+    cv_metrics$sd_fold_r_squared = sd(fold_r2_values, na.rm = TRUE)
+    
+    if (verbose) {
+      cat("\n  🎯 Cross-Validation Results (Aggregated):\n")
+      cat("    • Total validation obs:", cv_metrics$n_total_validation, "\n")
+      cat("    • CV R²:", round(cv_metrics$cv_r_squared, 4), "\n")
+      cat("    • Mean fold R² (±SD):", round(cv_metrics$mean_fold_r_squared, 4), 
+          "±", round(cv_metrics$sd_fold_r_squared, 4), "\n")
+      cat("    • CV RMSE:", round(cv_metrics$cv_rmse, 4), "\n")
+      cat("    • CV MAE:", round(cv_metrics$cv_mae, 4), "\n")
+    }
+  }
+  
+  # Fit final model on all data for predictions
+  if (verbose) cat("\n  🚀 Fitting final model on all data...\n")
+  
+  parcelles_data_final <- parcelles_data %>%
+    mutate(data_split = ifelse(is.na(.data[[variable_name]]), "predict", "train"))
+  
+  df_inla_final <- parcelles_data_final %>%
+    st_drop_geometry() %>%
+    left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+    left_join(year_map, by = "Year") %>%
+    mutate(
+      Y = case_when(
+        data_split == "train" ~ .data[[variable_name]],
+        TRUE ~ NA_real_
+      ),
+      ID.Field = Sequential_ID,
+      ID.Year = as.integer(ID.Year),
+      Month = as.integer(ifelse(is.na(Month), 6, Month)),
+      Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+      Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+      irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+    ) %>%
+    filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+    arrange(ID.Field, ID.Year)
+  
+  fit_final <- tryCatch({
+    prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+    
+    inla(
+      Y ~ 1 + Bloc + irrg_ty +
+        f(ID.Field, model = "besag", graph = W_matrix,
+          group = ID.Year, 
+          control.group = list(model = "ar1"),
+          hyper = list(prec = prec_prior),
+          constr = TRUE),
+      data = df_inla_final,
+      family = "gaussian",
+      control.predictor = list(compute = TRUE, link = 1),
+      control.compute = list(dic = TRUE, waic = TRUE),
+      control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+      verbose = FALSE
+    )
+  }, error = function(e) NULL)
+  
+  if (is.null(fit_final)) {
+    if (verbose) cat("  ❌ Final model fitting failed\n")
+    return(NULL)
+  }
+  
+  predictions_final <- fit_final$summary.fitted.values
+  
+  df_predicted_final <- df_inla_final %>%
+    mutate(
+      !!paste0(variable_name, "_predicted") := predictions_final$mean,
+      !!paste0(variable_name, "_predicted_sd") := predictions_final$sd,
+      !!paste0(variable_name, "_predicted_lower") := predictions_final$`0.025quant`,
+      !!paste0(variable_name, "_predicted_upper") := predictions_final$`0.975quant`,
+      !!paste0(variable_name, "_complete") := case_when(
+        data_split == "train" ~ Y,
+        TRUE ~ predictions_final$mean
+      ),
+      !!paste0(variable_name, "_prediction_type") := ifelse(data_split == "train", "Observed", "Predicted")
+    )
+  
+  result <- list(
+    variable_name = variable_name,
+    model_fit = fit_final,
+    predictions = df_predicted_final,
+    cv_predictions = combined_predictions,
+    cv_metrics = cv_metrics,
+    fold_metrics = fold_metrics,
+    n_total = n_total,
+    n_available = n_available,
+    n_missing = n_missing,
+    pct_available = pct_available
+  )
+  
+  return(result)
+}
+
+# Compositional imputation with 5-fold CV (PARALLELIZED)
+impute_compositional_granulometry_cv_parallel <- function(parcelles_data, W_matrix, field_map, 
+                                                          year_map, cv_folds, n_folds = 5, 
+                                                          verbose = TRUE, GRANULO_FRACTIONS) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING COMPOSITIONAL GRANULOMETRY (ILR) WITH 5-FOLD CV (PARALLEL)\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  parcelles_data <- parcelles_data %>%
+    mutate(obs_id = row_number())
+  
+  sampled_obs <- parcelles_data %>%
+    filter(has_complete_granulo)
+  
+  unsampled_obs <- parcelles_data %>%
+    filter(!has_complete_granulo)
+  
+  n_sampled <- nrow(sampled_obs)
+  n_unsampled <- nrow(unsampled_obs)
+  
+  if (verbose) {
+    cat("• Sampled observations:", n_sampled, "\n")
+    cat("• Unsampled observations:", n_unsampled, "\n")
+  }
+  
+  if (n_sampled < 30) {
+    if (verbose) cat("❌ Insufficient sampled observations\n")
+    return(NULL)
+  }
+  
+  # Prepare compositional data and ILR transform
+  comp_matrix <- sampled_obs %>%
+    st_drop_geometry() %>%
+    dplyr::select(all_of(GRANULO_FRACTIONS)) %>%
+    as.matrix()
+  
+  comp_matrix[comp_matrix <= 0] <- 0.01
+  row_sums <- rowSums(comp_matrix)
+  comp_matrix <- comp_matrix / row_sums * 100
+  
+  ilr_coords <- ilr_transform(comp_matrix / 100)
+  colnames(ilr_coords) <- paste0("ILR_", 1:4)
+  
+  if (verbose) {
+    cat("✅ ILR transformation: 5 fractions -> 4 orthonormal coordinates\n")
+    cat("  📤 Preparing parallel processing of ILR coordinates...\n")
+  }
+  
+  sampled_obs_ilr <- sampled_obs %>%
+    bind_cols(as.data.frame(ilr_coords))
+  
+  # PARALLEL PROCESSING OF ILR COORDINATES
+  ilr_results_list <- foreach(
+    i = 1:4,
+    .packages = c("sf", "INLA", "dplyr"),
+    .export = c("sampled_obs_ilr", "unsampled_obs", "cv_folds", "field_map", "year_map", 
+                "W_matrix", "n_folds"),
+    .errorhandling = "pass",
+    .verbose = FALSE
+  ) %dopar% {
+    
+    ilr_var <- paste0("ILR_", i)
+    
+    all_fold_predictions <- list()
+    fold_metrics <- list()
+    
+    # CV loop for this ILR coordinate
+    for (fold in 1:n_folds) {
+      
+      sampled_obs_fold <- sampled_obs_ilr %>%
+        left_join(cv_folds, by = "Final_Cleaned_ID") %>%
+        mutate(
+          data_split = case_when(
+            cv_fold == fold ~ "validation",
+            TRUE ~ "train"
+          )
+        )
+      
+      all_obs_fold <- bind_rows(
+        sampled_obs_fold %>% mutate(obs_type = "sampled"),
+        unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+      )
+      
+      df_inla <- all_obs_fold %>%
+        st_drop_geometry() %>%
+        left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+        left_join(year_map, by = "Year") %>%
+        mutate(
+          Y = case_when(
+            data_split == "train" ~ .data[[ilr_var]],
+            TRUE ~ NA_real_
+          ),
+          Y_true = .data[[ilr_var]],
+          ID.Field = Sequential_ID,
+          ID.Year = as.integer(ID.Year),
+          Month = as.integer(ifelse(is.na(Month), 6, Month)),
+          Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+          irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+        ) %>%
+        filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+        arrange(ID.Field, ID.Year)
+      
+      fit_result <- tryCatch({
+        prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+        
+        inla(
+          Y ~ 1 + Bloc + irrg_ty +
+            f(ID.Field, model = "besag", graph = W_matrix,
+              group = ID.Year, 
+              control.group = list(model = "ar1"),
+              hyper = list(prec = prec_prior),
+              constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE, waic = TRUE),
+          control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+          verbose = FALSE
+        )
+      }, error = function(e) NULL)
+      
+      if (!is.null(fit_result)) {
+        predictions <- fit_result$summary.fitted.values
+        
+        df_predicted <- df_inla %>%
+          mutate(
+            fold = fold,
+            predicted = predictions$mean,
+            predicted_sd = predictions$sd
+          )
+        
+        all_fold_predictions[[fold]] <- df_predicted
+        
+        # Validation metrics
+        val_data <- df_predicted %>%
+          filter(data_split == "validation", !is.na(Y_true))
+        
+        if (nrow(val_data) > 5) {
+          pred_vals <- val_data$predicted
+          true_vals <- val_data$Y_true
+          
+          ss_res <- sum((true_vals - pred_vals)^2)
+          ss_tot <- sum((true_vals - mean(true_vals))^2)
+          
+          fold_metrics[[fold]] <- list(
+            fold = fold,
+            r_squared = 1 - (ss_res / ss_tot),
+            rmse = sqrt(mean((true_vals - pred_vals)^2)),
+            n_val = nrow(val_data)
+          )
+        }
+      }
+    }
+    
+    # Aggregate CV results for this ILR coordinate
+    cv_metrics_ilr <- NULL
+    combined_predictions <- NULL
+    
+    if (length(all_fold_predictions) > 0) {
+      combined_predictions <- bind_rows(all_fold_predictions)
+      
+      all_validation <- combined_predictions %>%
+        filter(data_split == "validation", !is.na(Y_true))
+      
+      if (nrow(all_validation) > 5) {
+        pred_vals <- all_validation$predicted
+        true_vals <- all_validation$Y_true
+        
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        cv_metrics_ilr <- list(
+          cv_r_squared = 1 - (ss_res / ss_tot),
+          cv_rmse = sqrt(mean((true_vals - pred_vals)^2)),
+          n_val = nrow(all_validation)
+        )
+        
+        fold_r2 <- sapply(fold_metrics, function(x) x$r_squared)
+        cv_metrics_ilr$mean_fold_r_squared = mean(fold_r2, na.rm = TRUE)
+        cv_metrics_ilr$sd_fold_r_squared = sd(fold_r2, na.rm = TRUE)
+      }
+    }
+    
+    # Fit final model on all data
+    all_obs_final <- bind_rows(
+      sampled_obs_ilr %>% mutate(obs_type = "sampled", data_split = "train"),
+      unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+    )
+    
+    df_inla_final <- all_obs_final %>%
+      st_drop_geometry() %>%
+      left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+      left_join(year_map, by = "Year") %>%
+      mutate(
+        Y = case_when(
+          data_split == "train" ~ .data[[ilr_var]],
+          TRUE ~ NA_real_
+        ),
+        ID.Field = Sequential_ID,
+        ID.Year = as.integer(ID.Year),
+        Month = as.integer(ifelse(is.na(Month), 6, Month)),
+        Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+        irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+      ) %>%
+      filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+      arrange(ID.Field, ID.Year)
+    
+    fit_final <- tryCatch({
+      prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+      
+      inla(
+        Y ~ 1 + Bloc + irrg_ty +
+          f(ID.Field, model = "besag", graph = W_matrix,
+            group = ID.Year, 
+            control.group = list(model = "ar1"),
+            hyper = list(prec = prec_prior),
+            constr = TRUE),
+        data = df_inla_final,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE),
+        verbose = FALSE
+      )
+    }, error = function(e) NULL)
+    
+    predictions_final <- NULL
+    if (!is.null(fit_final)) {
+      predictions_final <- fit_final$summary.fitted.values
+      
+      df_predicted_final <- df_inla_final %>%
+        mutate(
+          !!paste0(ilr_var, "_predicted") := predictions_final$mean,
+          !!paste0(ilr_var, "_predicted_sd") := predictions_final$sd
+        )
+      
+      return(list(
+        success = TRUE,
+        ilr_var = ilr_var,
+        model = fit_final,
+        predictions = df_predicted_final,
+        cv_predictions = combined_predictions,
+        cv_metrics = cv_metrics_ilr,
+        fold_metrics = fold_metrics
+      ))
+    } else {
+      return(list(success = FALSE, ilr_var = ilr_var))
+    }
+  }
+  
+  # Process parallel ILR results
+  if (verbose) cat("\n  📥 Processing parallel ILR results...\n")
+  
+  ilr_cv_results <- list()
+  for (result in ilr_results_list) {
+    if (is.list(result) && !is.null(result$success) && result$success) {
+      ilr_var <- result$ilr_var
+      ilr_cv_results[[ilr_var]] <- result
+      
+      if (verbose && !is.null(result$cv_metrics$cv_r_squared)) {
+        cat("    ✅", ilr_var, "- CV R²:", round(result$cv_metrics$cv_r_squared, 4), 
+            "± SD:", round(result$cv_metrics$sd_fold_r_squared, 4), "\n")
+      }
+    } else {
+      if (verbose) cat("    ❌", result$ilr_var, "failed\n")
+    }
+  }
+  
+  if (length(ilr_cv_results) != 4) {
+    if (verbose) cat("❌ Not all ILR coordinates fitted successfully\n")
+    return(NULL)
+  }
+  
+  # Transform back to composition
+  if (verbose) cat("\n🔄 Transforming back to composition...\n")
+  
+  all_predictions <- ilr_cv_results[[1]]$predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, data_split, obs_type,
+                  ILR_1_predicted, ILR_1_predicted_sd)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    pred_cols <- ilr_cv_results[[ilr_var]]$predictions %>%
+      dplyr::select(obs_id, !!paste0(ilr_var, "_predicted"), !!paste0(ilr_var, "_predicted_sd"))
+    
+    all_predictions <- all_predictions %>%
+      left_join(pred_cols, by = "obs_id")
+  }
+  
+  ilr_pred_matrix <- all_predictions %>%
+    dplyr::select(ILR_1_predicted, ILR_2_predicted, ILR_3_predicted, ILR_4_predicted) %>%
+    as.matrix()
+  
+  comp_predicted <- ilr_inverse(ilr_pred_matrix)
+  comp_predicted_pct <- comp_predicted * 100
+  colnames(comp_predicted_pct) <- GRANULO_FRACTIONS
+  
+  if (verbose) {
+    cat("✅ ILR back-transformation complete\n")
+    sums_check <- rowSums(comp_predicted_pct)
+    cat("• Sum range:", round(min(sums_check), 2), "to", round(max(sums_check), 2), "%\n")
+  }
+  
+  final_results <- all_predictions %>%
+    bind_cols(as.data.frame(comp_predicted_pct) %>%
+                rename_with(~paste0(., "_predicted"), all_of(GRANULO_FRACTIONS)))
+  
+  for (frac in GRANULO_FRACTIONS) {
+    original_map <- bind_rows(sampled_obs_ilr, unsampled_obs) %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(original_value = !!frac)
+    
+    final_results <- final_results %>%
+      left_join(original_map, by = "obs_id")
+    
+    pred_col <- paste0(frac, "_predicted")
+    
+    final_results[[paste0(frac, "_complete")]] <- ifelse(
+      final_results$data_split == "train",
+      final_results$original_value,
+      final_results[[pred_col]]
+    )
+    
+    final_results[[paste0(frac, "_prediction_type")]] <- final_results$data_split
+    
+    final_results <- final_results %>% dplyr::select(-original_value)
+  }
+  
+  # Calculate CV metrics for fractions
+  cv_frac_metrics <- list()
+  
+  # Get CV predictions for all ILR coordinates
+  all_ilr_cv <- ilr_cv_results[[1]]$cv_predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, fold, data_split, ILR_1 = predicted)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    cv_cols <- ilr_cv_results[[ilr_var]]$cv_predictions %>%
+      dplyr::select(obs_id, fold, !!paste0("ILR_", i) := predicted)
+    
+    all_ilr_cv <- all_ilr_cv %>%
+      left_join(cv_cols, by = c("obs_id", "fold"))
+  }
+  
+  # Transform CV predictions back to composition
+  ilr_cv_matrix <- all_ilr_cv %>%
+    dplyr::select(ILR_1, ILR_2, ILR_3, ILR_4) %>%
+    as.matrix()
+  
+  comp_cv_predicted <- ilr_inverse(ilr_cv_matrix)
+  comp_cv_predicted_pct <- comp_cv_predicted * 100
+  colnames(comp_cv_predicted_pct) <- GRANULO_FRACTIONS
+  
+  cv_predictions_fractions <- all_ilr_cv %>%
+    bind_cols(as.data.frame(comp_cv_predicted_pct))
+  
+  # Calculate metrics for each fraction
+  for (frac in GRANULO_FRACTIONS) {
+    true_map <- sampled_obs_ilr %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(true_val = !!frac)
+    
+    cv_comparison <- cv_predictions_fractions %>%
+      filter(data_split == "validation") %>%
+      left_join(true_map, by = "obs_id")
+    
+    if (sum(!is.na(cv_comparison$true_val)) > 5) {
+      true_vals <- cv_comparison$true_val
+      pred_vals <- cv_comparison[[frac]]
+      
+      valid_idx <- !is.na(true_vals) & !is.na(pred_vals)
+      true_vals <- true_vals[valid_idx]
+      pred_vals <- pred_vals[valid_idx]
+      
+      if (length(true_vals) > 0) {
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        cv_frac_metrics[[frac]] <- list(
+          cv_r_squared = 1 - (ss_res / ss_tot),
+          cv_rmse = sqrt(mean((true_vals - pred_vals)^2)),
+          cv_mae = mean(abs(true_vals - pred_vals)),
+          n = length(true_vals)
+        )
+      }
+    }
+  }
+  
+  overall_metrics <- list(
+    fraction_metrics = cv_frac_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  )
+  
+  if (verbose) {
+    cat("\n🎯 Cross-Validation Results (Back-transformed Fractions):\n")
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(cv_frac_metrics[[frac]])) {
+        cat("• ", frac, ": CV R²=", round(cv_frac_metrics[[frac]]$cv_r_squared, 4),
+            " RMSE=", round(cv_frac_metrics[[frac]]$cv_rmse, 2), "% (n=", 
+            cv_frac_metrics[[frac]]$n, ")\n", sep="")
+      }
+    }
+  }
+  
+  return(list(
+    predictions = final_results,
+    cv_predictions = cv_predictions_fractions,
+    ilr_results = ilr_cv_results,
+    metrics = overall_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  ))
+}
+
+# ============================================================================
+# STEP 7: CREATE CV FOLDS
+# ============================================================================
+cat("\n🎲 CREATING 5-FOLD CROSS-VALIDATION SPLITS:\n")
+cat("=", rep("=", 45), "\n", sep="")
+
+# Create CV folds based on unique parcels
+unique_parcels_with_data <- parcelles_complete %>%
+  st_drop_geometry() %>%
+  filter(!is.na(pH) | has_complete_granulo) %>%
+  dplyr::select(Final_Cleaned_ID) %>%
+  distinct() %>%
+  pull(Final_Cleaned_ID)
+
+cv_fold_assignment <- create_cv_folds(unique_parcels_with_data, n_folds = 5, seed = 123)
+
+cat("• Total unique parcels with data:", length(unique_parcels_with_data), "\n")
+cat("• Parcels per fold:\n")
+for (fold in 1:5) {
+  n_parcels <- sum(cv_fold_assignment$cv_fold == fold)
+  cat("  Fold", fold, ":", n_parcels, "parcels\n")
+}
+
+# ============================================================================
+# STEP 8: PROCESS ALL VARIABLES WITH CV (PARALLEL)
+# ============================================================================
+cat("\n🔄 PROCESSING ALL VARIABLES WITH 5-FOLD CV (PARALLEL):\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+all_results <- list()
+all_metrics <- data.frame()
+failed_variables <- character(0)
+
+# Process compositional granulometry
+cat("\n[COMPOSITIONAL] Processing granulometry fractions with CV (PARALLEL)...\n")
+
+granulo_result <- impute_compositional_granulometry_cv_parallel(
+  parcelles_data = parcelles_complete,
+  W_matrix = W.P1_complete,
+  field_map = field_mapping,
+  year_map = year_mapping,
+  cv_folds = cv_fold_assignment,
+  n_folds = 5,
+  verbose = TRUE,
+  GRANULO_FRACTIONS = GRANULO_FRACTIONS
+)
+
+if (!is.null(granulo_result)) {
+  all_results[["Granulometry_Compositional"]] <- granulo_result
+  
+  if (!is.null(granulo_result$metrics$fraction_metrics)) {
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(granulo_result$metrics$fraction_metrics[[frac]])) {
+        metrics_row <- data.frame(
+          Variable = frac,
+          N_Total = nrow(parcelles_complete),
+          N_Available = granulo_result$n_sampled,
+          N_Missing = granulo_result$n_unsampled,
+          Pct_Available = round(granulo_result$n_sampled / nrow(parcelles_complete) * 100, 1),
+          CV_R_Squared = granulo_result$metrics$fraction_metrics[[frac]]$cv_r_squared,
+          CV_RMSE = granulo_result$metrics$fraction_metrics[[frac]]$cv_rmse,
+          CV_MAE = granulo_result$metrics$fraction_metrics[[frac]]$cv_mae,
+          N_CV_Validation = granulo_result$metrics$fraction_metrics[[frac]]$n,
+          stringsAsFactors = FALSE
+        )
+        
+        all_metrics <- rbind(all_metrics, metrics_row)
+      }
+    }
+  }
+  cat("✅ SUCCESS for compositional granulometry\n")
+} else {
+  failed_variables <- c(failed_variables, GRANULO_FRACTIONS)
+  cat("❌ FAILED for compositional granulometry\n")
+}
+
+# Process non-compositional variables (SEQUENTIAL - one at a time due to memory)
+cat("\n[NON-COMPOSITIONAL] Processing variables sequentially...\n")
+cat("(Sequential processing to manage memory for INLA models)\n")
+
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+  
+  result <- impute_single_variable_cv_parallel(
+    variable_name = var_name,
+    parcelles_data = parcelles_complete,
+    W_matrix = W.P1_complete,
+    field_map = field_mapping,
+    year_map = year_mapping,
+    cv_folds = cv_fold_assignment,
+    n_folds = 5,
+    verbose = TRUE
+  )
+  
+  if (!is.null(result)) {
+    all_results[[var_name]] <- result
+    
+    metrics_row <- data.frame(
+      Variable = var_name,
+      N_Total = result$n_total,
+      N_Available = result$n_available,
+      N_Missing = result$n_missing,
+      Pct_Available = result$pct_available,
+      CV_R_Squared = ifelse(is.null(result$cv_metrics$cv_r_squared), NA, result$cv_metrics$cv_r_squared),
+      CV_RMSE = ifelse(is.null(result$cv_metrics$cv_rmse), NA, result$cv_metrics$cv_rmse),
+      CV_MAE = ifelse(is.null(result$cv_metrics$cv_mae), NA, result$cv_metrics$cv_mae),
+      N_CV_Validation = ifelse(is.null(result$cv_metrics$n_total_validation), 0, result$cv_metrics$n_total_validation),
+      Mean_Fold_R_Squared = ifelse(is.null(result$cv_metrics$mean_fold_r_squared), NA, result$cv_metrics$mean_fold_r_squared),
+      SD_Fold_R_Squared = ifelse(is.null(result$cv_metrics$sd_fold_r_squared), NA, result$cv_metrics$sd_fold_r_squared),
+      stringsAsFactors = FALSE
+    )
+    
+    all_metrics <- rbind(all_metrics, metrics_row)
+    cat("✅ SUCCESS for", var_name, "\n")
+  } else {
+    failed_variables <- c(failed_variables, var_name)
+    cat("❌ FAILED for", var_name, "\n")
+  }
+  
+  # Force garbage collection after each variable
+  gc()
+}
+
+# ============================================================================
+# STEP 9: COMBINE ALL PREDICTIONS
+# ============================================================================
+cat("\n🔗 COMBINING ALL PREDICTIONS:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+successful_variables <- names(all_results)
+cat("Successfully processed:", length(successful_variables), "variable groups\n")
+
+final_dataset <- parcelles_complete %>% 
+  st_drop_geometry() %>%
+  group_by(Final_Cleaned_ID, Year) %>%
+  mutate(
+    replicate_id = row_number(),
+    unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+  ) %>%
+  ungroup() %>%
+  mutate(original_row_id = row_number())
+
+final_dataset <- parcelles_complete %>%
+  mutate(original_row_id = row_number()) %>%
+  left_join(
+    final_dataset %>% dplyr::select(original_row_id, replicate_id, unique_key),
+    by = "original_row_id"
+  )
+
+# Add CV fold assignment
+final_dataset <- final_dataset %>%
+  left_join(cv_fold_assignment, by = "Final_Cleaned_ID")
+
+# Add granulometry predictions
+if ("Granulometry_Compositional" %in% names(all_results)) {
+  cat("\n[COMPOSITIONAL] Adding granulometry predictions...\n")
+  
+  final_dataset <- final_dataset %>%
+    mutate(obs_id = row_number())
+  
+  granulo_preds <- all_results[["Granulometry_Compositional"]]$predictions
+  
+  final_dataset <- final_dataset %>%
+    left_join(
+      granulo_preds %>% 
+        dplyr::select(obs_id, matches("^Clay_|^Fine_Silt_|^Coarse_Silt_|^Fine_Sand_|^Coarse_Sand_|^ILR_")),
+      by = "obs_id"
+    )
+  
+  final_dataset <- final_dataset %>% dplyr::select(-obs_id)
+  cat("  ✅ Compositional predictions added\n")
+}
+
+# Add non-compositional predictions
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  if (var_name %in% names(all_results)) {
+    cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Adding:", var_name, "\n")
+    
+    result <- all_results[[var_name]]
+    
+    df_inla_reference <- parcelles_complete %>% 
+      st_drop_geometry() %>% 
+      left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID"), 
+                relationship = "many-to-one") %>%  
+      left_join(year_mapping, by = "Year", 
+                relationship = "many-to-one") %>%  
+      filter(!is.na(Sequential_ID), !is.na(ID.Year)) %>% 
+      group_by(Final_Cleaned_ID, Year) %>%
+      mutate(
+        replicate_id = row_number(),
+        unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+      ) %>%
+      ungroup() %>%
+      mutate(original_row_id = row_number()) %>% 
+      arrange(Sequential_ID, ID.Year, replicate_id) %>%
+      mutate(inla_row_id = row_number())
+    
+    if (nrow(df_inla_reference) == nrow(result$predictions)) {
+      predictions_aligned <- df_inla_reference %>% 
+        dplyr::select(Final_Cleaned_ID, Year, replicate_id, unique_key, original_row_id) %>% 
+        bind_cols(
+          result$predictions %>% 
+            dplyr::select(matches(paste0("^", var_name, "_")))
+        )
+      
+      final_dataset <- final_dataset %>% 
+        left_join(
+          predictions_aligned %>% dplyr::select(-Final_Cleaned_ID, -Year, -replicate_id, -original_row_id),
+          by = "unique_key"
+        )
+      
+      first_pred_col <- paste0(var_name, "_predicted")
+      if (first_pred_col %in% colnames(final_dataset)) {
+        non_null_count <- sum(!is.na(final_dataset[[first_pred_col]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+      }
+    }
+    
+    gc()
+  }
+}
+
+final_dataset <- final_dataset %>% 
+  dplyr::select(-original_row_id)
+
+cat("\n✅ Final combined dataset created\n")
+cat("• Total observations:", nrow(final_dataset), "\n")
+cat("• Total columns:", ncol(final_dataset), "\n")
+
+gc()
+
+# ============================================================================
+# STEP 10: SAVE COMPREHENSIVE OUTPUTS
+# ============================================================================
+cat("\n💾 SAVING COMPREHENSIVE OUTPUTS:\n")
+cat("=", rep("=", 35), "\n", sep="")
+
+base_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/"
+
+gpkg_output <- paste0(base_path, "parcels_ALL_VARIABLES_CV_predictions_PARALLEL.gpkg")
+st_write(final_dataset, gpkg_output, delete_dsn = TRUE, quiet = TRUE)
+cat("✅ Complete dataset saved:", basename(gpkg_output), "\n")
+
+csv_output <- paste0(base_path, "parcels_ALL_VARIABLES_CV_attributes_PARALLEL.csv")
+st_drop_geometry(final_dataset) %>% write_csv(csv_output)
+cat("✅ Attributes saved:", basename(csv_output), "\n")
+
+metrics_output <- paste0(base_path, "ALL_VARIABLES_CV_metrics_summary_PARALLEL.csv")
+write_csv(all_metrics, metrics_output)
+cat("✅ CV metrics summary saved:", basename(metrics_output), "\n")
+
+# Save CV fold assignment
+cv_folds_output <- paste0(base_path, "CV_fold_assignment.csv")
+write_csv(cv_fold_assignment, cv_folds_output)
+cat("✅ CV fold assignment saved:", basename(cv_folds_output), "\n")
+```
+
+# II. Part 2 : Granulo Fractions Analysis
+
+## II.1. Data Import
+
+```{r}
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET AND IDENTIFY SOIL VARIABLES
+# ============================================================================
+cat("📂 LOADING COMPLETE DATASET AND IDENTIFYING SOIL VARIABLES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_complete.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stop("Dataset not available")
+}
+
+# Define compositional and non-compositional variables
+GRANULO_FRACTIONS <- c(
+  "Clay_percent",
+  "Fine_Silt_percent",
+  "Coarse_Silt_percent",
+  "Fine_Sand_percent",
+  "Coarse_Sand_percent"
+)
+
+NON_COMPOSITIONAL_VARIABLES <- c(
+  "pH",
+  "CN_Ratio", 
+  "Electrical_Conductivity_mmho_cm",
+  "Exchangeable_Calcium_meq_100g",
+  "Exchangeable_Magnesium_meq_100g", 
+  "Exchangeable_Sodium_meq_100g",
+  "Exchangeable_Potassium_meq_100g",
+  "Available_P2O5_mg_kg",
+  "Organic_Carbon_per_mille",
+  "Total_Nitrogen_per_mille",
+  "Total_Silt_percent",
+  "Total_Sand_percent", 
+  "Organic_Matter_percent",
+  "Sum_of_Exchangeable_Bases_meq_100g",
+  "CaO_g_100g",
+  "Mg_Ca_Ratio",
+  "Mg_K_Ratio",
+  "Compaction_Index"
+)
+
+cat("Compositional variables (granulometry):", length(GRANULO_FRACTIONS), "\n")
+cat("Non-compositional variables:", length(NON_COMPOSITIONAL_VARIABLES), "\n")
+
+# ============================================================================
+# ANALYZE GRANULOMETRY FRACTION SUMS
+# ============================================================================
+cat("\n📊 ANALYZING GRANULOMETRY FRACTION SUMS:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# Convert granulo columns to numeric and calculate sum
+parcelles_complete$granulo_sum <- rowSums(
+  st_drop_geometry(parcelles_complete)[, GRANULO_FRACTIONS] %>% 
+    mutate(across(everything(), as.numeric)),
+  na.rm = FALSE
+)
+
+# Categorize observations
+parcelles_complete$sum_category <- cut(
+  parcelles_complete$granulo_sum,
+  breaks = c(-Inf, 96, 104, Inf),
+  labels = c("< 96%", "96-104%", "> 104%"),
+  right = FALSE
+)
+
+# Summary statistics
+cat("\n📈 Summary of granulometry sums:\n")
+print(summary(parcelles_complete$granulo_sum))
+
+cat("\n📊 Distribution by category:\n")
+sum_table <- table(parcelles_complete$sum_category, useNA = "ifany")
+print(sum_table)
+cat("\nPercentages:\n")
+print(round(prop.table(sum_table) * 100, 2))
+```
+
+## II.2. Data Cleaning
+
+```{r}
+# ============================================================================
+# CLEAN DATA AND ANALYZE LOW SUM OBSERVATIONS
+# ============================================================================
+cat("\n🧹 CLEANING DATA AND ANALYZING LOW GRANULOMETRY SUMS:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(sf)
+
+# Create results folder
+results_folder <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/granulo_analysis_results"
+dir.create(results_folder, showWarnings = FALSE, recursive = TRUE)
+cat("📁 Results folder created:", results_folder, "\n")
+
+# Set granulometry fractions to NA for observations > 104%
+obs_to_clean <- which(parcelles_complete$granulo_sum > 104)
+cat("🗑️ Setting granulometry fractions to NA for", length(obs_to_clean), 
+    "observations with sum > 104%\n")
+
+parcelles_filtered <- parcelles_complete
+for (var in GRANULO_FRACTIONS) {
+  parcelles_filtered[obs_to_clean, var] <- NA
+}
+
+# Recalculate granulo_sum after cleaning
+parcelles_filtered$granulo_sum <- rowSums(
+  st_drop_geometry(parcelles_filtered)[, GRANULO_FRACTIONS] %>% 
+    mutate(across(everything(), as.numeric)),
+  na.rm = FALSE
+)
+
+# Recalculate categories
+parcelles_filtered$sum_category <- cut(
+  parcelles_filtered$granulo_sum,
+  breaks = c(-Inf, 96, 104, Inf),
+  labels = c("< 96%", "96-104%", "> 104%"),
+  right = FALSE
+)
+
+cat("📊 Total observations retained:", nrow(parcelles_filtered), "\n")
+
+# Focus on observations < 96%
+low_sum_obs <- parcelles_filtered %>%
+  filter(granulo_sum < 96)
+
+cat("\n📉 Analyzing", nrow(low_sum_obs), "observations with sum < 96%\n")
+
+# ============================================================================
+# TEMPORAL AND SPATIAL ANALYSIS
+# ============================================================================
+
+# Summary by Year
+year_summary <- low_sum_obs %>%
+  st_drop_geometry() %>%
+  group_by(Year) %>%
+  summarise(
+    count = n(),
+    mean_sum = mean(granulo_sum, na.rm = TRUE),
+    min_sum = min(granulo_sum, na.rm = TRUE),
+    max_sum = max(granulo_sum, na.rm = TRUE)
+  ) %>%
+  arrange(Year)
+
+cat("\n📅 Distribution by Year:\n")
+print(year_summary)
+
+# Summary by Bloc
+bloc_summary <- low_sum_obs %>%
+  st_drop_geometry() %>%
+  group_by(Bloc) %>%
+  summarise(
+    count = n(),
+    mean_sum = mean(granulo_sum, na.rm = TRUE),
+    min_sum = min(granulo_sum, na.rm = TRUE),
+    max_sum = max(granulo_sum, na.rm = TRUE)
+  ) %>%
+  arrange(desc(count))
+
+cat("\n🗺️ Distribution by Bloc:\n")
+print(bloc_summary)
+
+# Summary by Year and Bloc
+year_bloc_summary <- low_sum_obs %>%
+  st_drop_geometry() %>%
+  group_by(Year, Bloc) %>%
+  summarise(count = n(), .groups = "drop")
+
+cat("\n📊 Distribution by Year and Bloc:\n")
+print(year_bloc_summary)
+
+# Save summaries
+write.csv(year_summary, 
+          file.path(results_folder, "low_sum_by_year.csv"), 
+          row.names = FALSE)
+write.csv(bloc_summary, 
+          file.path(results_folder, "low_sum_by_bloc.csv"), 
+          row.names = FALSE)
+write.csv(year_bloc_summary, 
+          file.path(results_folder, "low_sum_by_year_bloc.csv"), 
+          row.names = FALSE)
+
+# ============================================================================
+# CREATE HEATMAP
+# ============================================================================
+
+# Prepare data for heatmap - ORDER BY irrg_ty (GRV first), THEN alphabetically by Bloc
+bloc_order_data <- parcelles_filtered %>%
+  st_drop_geometry() %>%
+  select(Bloc, irrg_ty) %>%
+  distinct() %>%
+  mutate(irrg_ty_order = ifelse(irrg_ty == "GRV", 1, 2)) %>%  # GRV = 1, others = 2
+  arrange(irrg_ty_order, Bloc) %>%  # Order by GRV first, then alphabetically
+  select(-irrg_ty_order)
+
+cat("\n📋 Bloc ordering (GRV first, then others, all alphabetically):\n")
+print(bloc_order_data)
+
+# Add irrg_ty to year_bloc_summary for the heatmap
+year_bloc_summary <- year_bloc_summary %>%
+  left_join(
+    parcelles_filtered %>% 
+      st_drop_geometry() %>% 
+      select(Bloc, irrg_ty) %>% 
+      distinct(),
+    by = "Bloc"
+  )
+
+# Create ordered factor for Bloc with the correct order
+year_bloc_summary$Bloc <- factor(
+  year_bloc_summary$Bloc,
+  levels = rev(bloc_order_data$Bloc)  # Reverse so GRV appears at top of plot
+)
+
+# Create color vectors for axes
+bloc_colors <- ifelse(bloc_order_data$irrg_ty == "GRV", "#2E7D32", "#D32F2F")
+names(bloc_colors) <- bloc_order_data$Bloc
+
+# Create heatmap with white background and larger fonts
+p <- ggplot(year_bloc_summary, aes(x = as.factor(Year), y = Bloc, fill = count)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient(low = "#FFF5E6", high = "#D32F2F", 
+                      name = "Count",
+                      na.value = "grey90") +
+  labs(
+    title = "Heatmap of Observations with Granulometry Sum < 96%",
+    subtitle = "Distribution across Years and Blocs (Green = GRV, Red = Other)",
+    x = "Year",
+    y = "Bloc"
+  ) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14, color = "black"),
+    axis.text.y = element_text(size = 12, color = bloc_colors[rev(bloc_order_data$Bloc)], face = "bold"),
+    axis.title.x = element_text(size = 16, face = "bold", color = "black"),
+    axis.title.y = element_text(size = 16, face = "bold", color = "black"),
+    plot.title = element_text(face = "bold", size = 18, color = "black"),
+    plot.subtitle = element_text(size = 14, color = "grey40"),
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "black"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  ) +
+  geom_text(aes(label = count), color = "black", size = 5, fontface = "bold")
+
+# Save heatmap
+ggsave(
+  filename = file.path(results_folder, "heatmap_low_sum_year_bloc.png"),
+  plot = p,
+  width = 14,
+  height = 12,
+  dpi = 300,
+  bg = "white"
+)
+
+cat("\n✅ Heatmap saved to:", file.path(results_folder, "heatmap_low_sum_year_bloc.png"), "\n")
+```
+
+## II.3. SPATIAL MAPS FOR ALL GRANULOMETRY SUM CATEGORIES
+
+```{r}
+# ============================================================================
+# SPATIAL MAPS FOR ALL GRANULOMETRY SUM CATEGORIES
+# ============================================================================
+cat("\n🗺️ CREATING SPATIAL MAPS FOR ALL GRANULOMETRY CATEGORIES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# Load required libraries
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(viridis)
+
+# Create results folder
+results_folder <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/granulo_analysis_results"
+dir.create(results_folder, showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================================
+# COUNT OBSERVATIONS PER PARCEL FOR EACH CATEGORY
+# ============================================================================
+
+# Category 1: < 96%
+parcel_low_count <- parcelles_filtered %>%
+  st_drop_geometry() %>%
+  filter(granulo_sum < 96) %>%
+  group_by(field) %>%
+  summarise(
+    count_below_96 = n(),
+    .groups = "drop"
+  )
+
+cat("\n📊 Category < 96%:\n")
+cat("Parcels with observations:", nrow(parcel_low_count), "\n")
+cat("Range:", min(parcel_low_count$count_below_96), 
+    "to", max(parcel_low_count$count_below_96), "\n")
+
+# Category 2: 96-104%
+parcel_normal_count <- parcelles_filtered %>%
+  st_drop_geometry() %>%
+  filter(granulo_sum >= 96 & granulo_sum <= 104) %>%
+  group_by(field) %>%
+  summarise(
+    count_96_104 = n(),
+    .groups = "drop"
+  )
+
+cat("\n📊 Category 96-104%:\n")
+cat("Parcels with observations:", nrow(parcel_normal_count), "\n")
+cat("Range:", min(parcel_normal_count$count_96_104), 
+    "to", max(parcel_normal_count$count_96_104), "\n")
+
+# Category 3: > 104%
+parcel_high_count <- parcelles_filtered %>%
+  st_drop_geometry() %>%
+  filter(granulo_sum > 104) %>%
+  group_by(field) %>%
+  summarise(
+    count_above_104 = n(),
+    .groups = "drop"
+  )
+
+cat("\n📊 Category > 104%:\n")
+cat("Parcels with observations:", nrow(parcel_high_count), "\n")
+cat("Range:", min(parcel_high_count$count_above_104), 
+    "to", max(parcel_high_count$count_above_104), "\n")
+
+# Get unique parcels with geometry
+parcels_spatial <- parcelles_filtered %>%
+  group_by(field) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(field, Bloc, irrg_ty)
+
+# Join all count data to spatial data
+parcels_map <- parcels_spatial %>%
+  left_join(parcel_low_count, by = "field") %>%
+  left_join(parcel_normal_count, by = "field") %>%
+  left_join(parcel_high_count, by = "field") %>%
+  mutate(
+    count_below_96 = ifelse(is.na(count_below_96), 0, count_below_96),
+    count_96_104 = ifelse(is.na(count_96_104), 0, count_96_104),
+    count_above_104 = ifelse(is.na(count_above_104), 0, count_above_104)
+  )
+
+# ============================================================================
+# MAP 1: GRANULOMETRY SUM < 96%
+# ============================================================================
+
+map1 <- ggplot() +
+  geom_sf(data = parcels_map %>% filter(count_below_96 == 0), 
+          fill = "#F5F5F5", 
+          color = "#E0E0E0", 
+          size = 0.1) +
+  geom_sf(data = parcels_map %>% filter(count_below_96 > 0), 
+          aes(fill = count_below_96), 
+          color = "#FFFFFF", 
+          size = 0.2) +
+  scale_fill_viridis(
+    option = "magma",
+    name = "Count of samples\nwith sum < 96%",
+    begin = 0.1,
+    end = 0.95,
+    direction = 1,
+    breaks = function(x) unique(floor(pretty(x))),
+    guide = guide_colorbar(
+      barwidth = 1.5,
+      barheight = 12,
+      title.position = "top",
+      title.hjust = 0.5,
+      frame.colour = "black",
+      ticks.colour = "black",
+      ticks.linewidth = 0.5
+    )
+  ) +
+  labs(
+    title = "Spatial distribution of low granulometry sum observations",
+    subtitle = "Count of sampling events with granulometry sum < 96% per parcel",
+    caption = "Gray parcels indicate no low granulometry observations"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "sans", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", 
+                              margin = margin(b = 8), hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey30", 
+                                 margin = margin(b = 12), hjust = 0),
+    plot.caption = element_text(size = 9, color = "grey50", 
+                                margin = margin(t = 12), hjust = 0),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold", lineheight = 1.2),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(color = "black", linewidth = 0.3),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "#F0F0F0", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.text = element_text(size = 8, color = "grey50"),
+    axis.title = element_blank()
+  )
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_below_96.png"),
+  plot = map1,
+  width = 10,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_below_96.pdf"),
+  plot = map1,
+  width = 10,
+  height = 8,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+cat("\n✅ Map 1 (< 96%) saved\n")
+
+# ============================================================================
+# MAP 2: GRANULOMETRY SUM 96-104%
+# ============================================================================
+
+map2 <- ggplot() +
+  geom_sf(data = parcels_map %>% filter(count_96_104 == 0), 
+          fill = "#F5F5F5", 
+          color = "#E0E0E0", 
+          size = 0.1) +
+  geom_sf(data = parcels_map %>% filter(count_96_104 > 0), 
+          aes(fill = count_96_104), 
+          color = "#FFFFFF", 
+          size = 0.2) +
+  scale_fill_viridis(
+    option = "magma",
+    name = "Count of samples\nwith sum 96-104%",
+    begin = 0.1,
+    end = 0.95,
+    direction = 1,
+    breaks = function(x) unique(floor(pretty(x))),
+    guide = guide_colorbar(
+      barwidth = 1.5,
+      barheight = 12,
+      title.position = "top",
+      title.hjust = 0.5,
+      frame.colour = "black",
+      ticks.colour = "black",
+      ticks.linewidth = 0.5
+    )
+  ) +
+  labs(
+    title = "Spatial distribution of normal granulometry sum observations",
+    subtitle = "Count of sampling events with granulometry sum 96-104% per parcel",
+    caption = "Gray parcels indicate no observations in this range"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "sans", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", 
+                              margin = margin(b = 8), hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey30", 
+                                 margin = margin(b = 12), hjust = 0),
+    plot.caption = element_text(size = 9, color = "grey50", 
+                                margin = margin(t = 12), hjust = 0),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold", lineheight = 1.2),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(color = "black", linewidth = 0.3),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "#F0F0F0", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.text = element_text(size = 8, color = "grey50"),
+    axis.title = element_blank()
+  )
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_96_104.png"),
+  plot = map2,
+  width = 10,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_96_104.pdf"),
+  plot = map2,
+  width = 10,
+  height = 8,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+cat("✅ Map 2 (96-104%) saved\n")
+
+# ============================================================================
+# MAP 3: GRANULOMETRY SUM > 104%
+# ============================================================================
+
+map3 <- ggplot() +
+  geom_sf(data = parcels_map %>% filter(count_above_104 == 0), 
+          fill = "#F5F5F5", 
+          color = "#E0E0E0", 
+          size = 0.1) +
+  geom_sf(data = parcels_map %>% filter(count_above_104 > 0), 
+          aes(fill = count_above_104), 
+          color = "#FFFFFF", 
+          size = 0.2) +
+  scale_fill_viridis(
+    option = "magma",
+    name = "Count of samples\nwith sum > 104%",
+    begin = 0.1,
+    end = 0.95,
+    direction = 1,
+    breaks = function(x) unique(floor(pretty(x))),
+    guide = guide_colorbar(
+      barwidth = 1.5,
+      barheight = 12,
+      title.position = "top",
+      title.hjust = 0.5,
+      frame.colour = "black",
+      ticks.colour = "black",
+      ticks.linewidth = 0.5
+    )
+  ) +
+  labs(
+    title = "Spatial distribution of high granulometry sum observations",
+    subtitle = "Count of sampling events with granulometry sum > 104% per parcel",
+    caption = "Gray parcels indicate no high granulometry observations"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "sans", color = "black"),
+    plot.title = element_text(size = 14, face = "bold", 
+                              margin = margin(b = 8), hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey30", 
+                                 margin = margin(b = 12), hjust = 0),
+    plot.caption = element_text(size = 9, color = "grey50", 
+                                margin = margin(t = 12), hjust = 0),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold", lineheight = 1.2),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(color = "black", linewidth = 0.3),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "#F0F0F0", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(15, 15, 15, 15),
+    axis.text = element_text(size = 8, color = "grey50"),
+    axis.title = element_blank()
+  )
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_above_104.png"),
+  plot = map3,
+  width = 10,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(results_folder, "spatial_map_above_104.pdf"),
+  plot = map3,
+  width = 10,
+  height = 8,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+cat("✅ Map 3 (> 104%) saved\n")
+
+# ============================================================================
+# SAVE SUMMARY STATISTICS FOR ALL CATEGORIES
+# ============================================================================
+
+summary_all <- data.frame(
+  Category = rep(c("< 96%", "96-104%", "> 104%"), each = 8),
+  Metric = rep(c(
+    "Total parcels",
+    "Parcels with observations",
+    "Parcels without observations",
+    "Percentage with observations",
+    "Min count",
+    "Max count",
+    "Mean count",
+    "Median count"
+  ), 3),
+  Value = c(
+    # < 96%
+    nrow(parcels_map),
+    sum(parcels_map$count_below_96 > 0),
+    sum(parcels_map$count_below_96 == 0),
+    paste0(round(sum(parcels_map$count_below_96 > 0) / nrow(parcels_map) * 100, 2), "%"),
+    ifelse(nrow(parcel_low_count) > 0, min(parcel_low_count$count_below_96), 0),
+    ifelse(nrow(parcel_low_count) > 0, max(parcel_low_count$count_below_96), 0),
+    ifelse(nrow(parcel_low_count) > 0, round(mean(parcel_low_count$count_below_96), 2), 0),
+    ifelse(nrow(parcel_low_count) > 0, median(parcel_low_count$count_below_96), 0),
+    
+    # 96-104%
+    nrow(parcels_map),
+    sum(parcels_map$count_96_104 > 0),
+    sum(parcels_map$count_96_104 == 0),
+    paste0(round(sum(parcels_map$count_96_104 > 0) / nrow(parcels_map) * 100, 2), "%"),
+    ifelse(nrow(parcel_normal_count) > 0, min(parcel_normal_count$count_96_104), 0),
+    ifelse(nrow(parcel_normal_count) > 0, max(parcel_normal_count$count_96_104), 0),
+    ifelse(nrow(parcel_normal_count) > 0, round(mean(parcel_normal_count$count_96_104), 2), 0),
+    ifelse(nrow(parcel_normal_count) > 0, median(parcel_normal_count$count_96_104), 0),
+    
+    # > 104%
+    nrow(parcels_map),
+    sum(parcels_map$count_above_104 > 0),
+    sum(parcels_map$count_above_104 == 0),
+    paste0(round(sum(parcels_map$count_above_104 > 0) / nrow(parcels_map) * 100, 2), "%"),
+    ifelse(nrow(parcel_high_count) > 0, min(parcel_high_count$count_above_104), 0),
+    ifelse(nrow(parcel_high_count) > 0, max(parcel_high_count$count_above_104), 0),
+    ifelse(nrow(parcel_high_count) > 0, round(mean(parcel_high_count$count_above_104), 2), 0),
+    ifelse(nrow(parcel_high_count) > 0, median(parcel_high_count$count_above_104), 0)
+  )
+)
+
+write.csv(summary_all, 
+          file.path(results_folder, "spatial_summary_all_categories.csv"), 
+          row.names = FALSE)
+
+```
+
+```{r}
+# ============================================================================
+# CREATE CLEAN GEOPACKAGE - REMOVE GRANULOMETRY DATA FOR SUM < 96% OR > 104%
+# ============================================================================
+cat("\n🧹 CREATING CLEAN GEOPACKAGE:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# Create a copy of the filtered data
+parcelles_clean <- parcelles_filtered
+
+# Identify observations to clean (sum < 96% OR sum > 104%)
+obs_to_clean_low <- which(parcelles_clean$granulo_sum < 96)
+obs_to_clean_high <- which(parcelles_clean$granulo_sum > 104)
+obs_to_clean_all <- unique(c(obs_to_clean_low, obs_to_clean_high))
+
+cat("📊 Observations to clean:\n")
+cat("  - Sum < 96%:", length(obs_to_clean_low), "observations\n")
+cat("  - Sum > 104%:", length(obs_to_clean_high), "observations\n")
+cat("  - Total to clean:", length(obs_to_clean_all), "observations\n")
+
+# Set granulometry fractions to NA for problematic observations
+for (var in GRANULO_FRACTIONS) {
+  parcelles_clean[obs_to_clean_all, var] <- NA
+}
+
+# Recalculate granulo_sum after cleaning
+parcelles_clean$granulo_sum <- rowSums(
+  st_drop_geometry(parcelles_clean)[, GRANULO_FRACTIONS] %>% 
+    mutate(across(everything(), as.numeric)),
+  na.rm = FALSE
+)
+
+# Recalculate categories
+parcelles_clean$sum_category <- cut(
+  parcelles_clean$granulo_sum,
+  breaks = c(-Inf, 96, 104, Inf),
+  labels = c("< 96%", "96-104%", "> 104%"),
+  right = FALSE
+)
+
+# Check results
+cat("\n✅ After cleaning - Distribution by category:\n")
+sum_table_clean <- table(parcelles_clean$sum_category, useNA = "ifany")
+print(sum_table_clean)
+cat("\nPercentages:\n")
+print(round(prop.table(sum_table_clean) * 100, 2))
+
+# Count valid granulometry observations
+valid_granulo <- sum(!is.na(parcelles_clean$granulo_sum))
+cat("\n📊 Valid granulometry observations (96-104%):", valid_granulo, "\n")
+cat("📊 Invalid granulometry (set to NA):", length(obs_to_clean_all), "\n")
+
+# Save clean geopackage
+clean_gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_clean_granulo.gpkg"
+
+st_write(
+  parcelles_clean,
+  clean_gpkg_path,
+  driver = "GPKG",
+  delete_dsn = TRUE,  # Overwrite if exists
+  quiet = FALSE
+)
+
+cat("\n✅ Clean geopackage saved to:\n")
+cat("  ", clean_gpkg_path, "\n")
+
+# ============================================================================
+# SUMMARY STATISTICS OF CLEAN DATASET
+# ============================================================================
+cat("\n📋 CLEAN DATASET SUMMARY:\n")
+cat("=", rep("=", 60), "\n", sep="")
+cat("Total observations:", nrow(parcelles_clean), "\n")
+cat("Observations with valid granulometry (96-104%):", valid_granulo, 
+    "(", round(valid_granulo/nrow(parcelles_clean)*100, 2), "%)\n")
+cat("Observations with NA granulometry:", length(obs_to_clean_all),
+    "(", round(length(obs_to_clean_all)/nrow(parcelles_clean)*100, 2), "%)\n")
+
+# Show summary of valid granulometry sums
+cat("\n📊 Summary of valid granulometry sums (96-104%):\n")
+print(summary(parcelles_clean$granulo_sum[parcelles_clean$granulo_sum >= 96 & 
+                                          parcelles_clean$granulo_sum <= 104]))
+
+```
+
+## II.4. NORMALIZING GRANULOMETRY FRACTIONS TO 100%
+
+```{r}
+# ============================================================================
+# NORMALIZE GRANULOMETRY FRACTIONS TO 100%
+# ============================================================================
+cat("\n⚖️ NORMALIZING GRANULOMETRY FRACTIONS TO 100%:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# ============================================================================
+# METHOD 1: PROPORTIONAL CLOSURE 
+# ============================================================================
+# This is the standard method in compositional data analysis (Aitchison, 1986)
+# It preserves the relative proportions between fractions
+# Formula: normalized_value = (original_value / sum) * 100
+
+cat("\n📐 METHOD 1: Proportional Closure (Aitchison Closure)\n")
+cat("Reference: Aitchison, J. (1986). The Statistical Analysis of Compositional Data.\n\n")
+
+# Work with a non-spatial version for easier manipulation
+data_df <- st_drop_geometry(parcelles_clean)
+
+# Only normalize observations with valid granulometry (96-104%)
+valid_obs <- which(data_df$granulo_sum >= 96 & data_df$granulo_sum <= 104)
+
+cat("Normalizing", length(valid_obs), "observations with sum between 96-104%\n")
+
+for (i in valid_obs) {
+  # Get current sum
+  current_sum <- data_df$granulo_sum[i]
+  
+  # Calculate normalization factor
+  norm_factor <- 100 / current_sum
+  
+  # Apply to each fraction
+  for (var in GRANULO_FRACTIONS) {
+    current_value <- as.numeric(data_df[i, var])
+    if (length(current_value) == 1 && !is.na(current_value)) {
+      data_df[i, var] <- current_value * norm_factor
+    }
+  }
+}
+
+# Recalculate sums to verify
+data_df$granulo_sum_normalized <- rowSums(
+  data_df[, GRANULO_FRACTIONS] %>% 
+    mutate(across(everything(), as.numeric)),
+  na.rm = FALSE
+)
+
+cat("\n✅ Verification of normalized sums:\n")
+print(summary(data_df$granulo_sum_normalized[valid_obs]))
+
+# Check if all are 100% (within rounding error)
+all_100 <- all(abs(data_df$granulo_sum_normalized[valid_obs] - 100) < 0.001, 
+               na.rm = TRUE)
+cat("All normalized sums equal 100%:", all_100, "\n")
+
+# Recreate sf object with normalized data
+parcelles_normalized <- st_sf(data_df, geometry = st_geometry(parcelles_clean))
+
+# ============================================================================
+# SAVE NORMALIZED GEOPACKAGE
+# ============================================================================
+normalized_gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_normalized_granulo.gpkg"
+
+st_write(
+  parcelles_normalized,
+  normalized_gpkg_path,
+  driver = "GPKG",
+  delete_dsn = TRUE,
+  quiet = FALSE
+)
+
+cat("\n✅ Normalized geopackage saved to:\n")
+cat("  ", normalized_gpkg_path, "\n")
+
+# ============================================================================
+# COMPARISON: BEFORE vs AFTER NORMALIZATION
+# ============================================================================
+cat("\n📊 COMPARISON OF EXAMPLE OBSERVATIONS:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+# Show 5 random examples
+set.seed(123)
+sample_obs <- sample(valid_obs, min(5, length(valid_obs)))
+
+data_clean <- st_drop_geometry(parcelles_clean)
+data_norm <- st_drop_geometry(parcelles_normalized)
+
+for (idx in sample_obs) {
+  cat("\nObservation", idx, ":\n")
+  cat("  Original sum:", round(data_clean$granulo_sum[idx], 2), "%\n")
+  cat("  Normalized sum:", round(data_norm$granulo_sum_normalized[idx], 2), "%\n")
+  
+  for (var in GRANULO_FRACTIONS) {
+    orig <- as.numeric(data_clean[idx, var])
+    norm <- as.numeric(data_norm[idx, var])
+    cat(sprintf("    %s: %.2f%% → %.2f%%\n", var, orig, norm))
+  }
+}
+```
+
+# III. INLA Modelling
+
+```{r}
+# ============================================================================
+# MULTI-VARIABLE ENHANCED SPATIO-TEMPORAL IMPUTATION WITH TRAIN/VALIDATION SPLIT
+# Compositional treatment for granulometry fractions
+# ============================================================================
+
+library(sf)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(spdep)
+library(readr)
+library(purrr)
+library(tibble)
+
+cat("========================================\n")
+cat("  MULTI-VARIABLE SPATIO-TEMPORAL       \n")
+cat("  IMPUTATION WITH TRAIN/VAL SPLIT      \n")
+cat("========================================\n")
+
+# ============================================================================
+# STEP 1: LOAD THE COMPLETE DATASET AND IDENTIFY SOIL VARIABLES
+# ============================================================================
+cat("📂 LOADING COMPLETE DATASET AND IDENTIFYING SOIL VARIABLES:\n")
+cat("=", rep("=", 60), "\n", sep="")
+
+gpkg_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/parcels_with_soil_normalized_granulo.gpkg"
+
+if (file.exists(gpkg_path)) {
+  parcelles_complete <- st_read(gpkg_path, quiet = TRUE)
+  cat("✅ Complete dataset loaded:", nrow(parcelles_complete), "observations\n")
+} else {
+  cat("❌ Complete dataset not found. Please run the enhanced join script first.\n")
+  stop("Dataset not available")
+}
+
+# Define compositional and non-compositional variables
+GRANULO_FRACTIONS <- c(
+  "Clay_percent",
+  "Fine_Silt_percent",
+  "Coarse_Silt_percent",
+  "Fine_Sand_percent",
+  "Coarse_Sand_percent"
+)
+
+NON_COMPOSITIONAL_VARIABLES <- c(
+  "pH",
+  "CN_Ratio", 
+  "Electrical_Conductivity_mmho_cm",
+  "Exchangeable_Calcium_meq_100g",
+  "Exchangeable_Magnesium_meq_100g", 
+  "Exchangeable_Sodium_meq_100g",
+  "Exchangeable_Potassium_meq_100g",
+  "Available_P2O5_mg_kg",
+  "Organic_Carbon_per_mille",
+  "Total_Nitrogen_per_mille",
+  "Total_Silt_percent",
+  "Total_Sand_percent", 
+  "Organic_Matter_percent",
+  "Sum_of_Exchangeable_Bases_meq_100g",
+  "CaO_g_100g",
+  "Mg_Ca_Ratio",
+  "Mg_K_Ratio",
+  "Compaction_Index"
+)
+
+cat("Compositional variables (granulometry):", length(GRANULO_FRACTIONS), "\n")
+cat("Non-compositional variables:", length(NON_COMPOSITIONAL_VARIABLES), "\n")
+
+for (i in seq_along(GRANULO_FRACTIONS)) {
+  var_name <- GRANULO_FRACTIONS[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  n_available <- sum(!is.na(parcelles_complete[[var_name]]))
+  pct_available <- round(n_available/nrow(parcelles_complete)*100, 1)
+  cat(sprintf("• %2d. %-35s: %4d available (%5.1f%%), %4d missing\n", 
+              length(GRANULO_FRACTIONS) + i, var_name, n_available, pct_available, sum(is.na(parcelles_complete[[var_name]]))))
+}
+
+cat("\nDataset structure:\n")
+cat("• Total observations:", nrow(parcelles_complete), "\n")
+cat("• Unique parcels:", length(unique(parcelles_complete$Final_Cleaned_ID)), "\n")
+cat("• Year range:", min(parcelles_complete$Year, na.rm = TRUE), "-", max(parcelles_complete$Year, na.rm = TRUE), "\n")
+
+# Validate compositional data
+parcelles_complete <- parcelles_complete %>%
+  mutate(
+    has_complete_granulo = !is.na(Clay_percent) & 
+                          !is.na(Fine_Silt_percent) & 
+                          !is.na(Coarse_Silt_percent) & 
+                          !is.na(Fine_Sand_percent) & 
+                          !is.na(Coarse_Sand_percent),
+    granulo_sum = Clay_percent + Fine_Silt_percent + Coarse_Silt_percent + 
+                  Fine_Sand_percent + Coarse_Sand_percent
+  )
+
+complete_granulo <- sum(parcelles_complete$has_complete_granulo, na.rm = TRUE)
+cat("\n🔍 COMPOSITIONAL DATA VALIDATION:\n")
+cat("• Observations with complete granulometry:", complete_granulo, "\n")
+
+if(complete_granulo > 0) {
+  sum_stats <- parcelles_complete %>%
+    filter(has_complete_granulo) %>%
+    pull(granulo_sum) %>%
+    summary()
+  cat("• Sum range:", round(sum_stats[1], 2), "to", round(sum_stats[6], 2), "%\n")
+}
+
+# ============================================================================
+# STEP 2: PREPARE SHARED SPATIAL STRUCTURE
+# ============================================================================
+cat("\n🗺️ PREPARING SHARED SPATIAL STRUCTURE:\n")
+cat("=", rep("=", 40), "\n", sep="")
+
+unique_parcels_spatial <- parcelles_complete %>%
+  group_by(Final_Cleaned_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(Final_Cleaned_ID)
+
+cat("Unique parcels for spatial analysis:", nrow(unique_parcels_spatial), "\n")
+
+unique_parcels_spatial <- st_make_valid(unique_parcels_spatial)
+cat("Geometries validated\n")
+
+field_mapping <- data.frame(
+  Original_ID = unique_parcels_spatial$Final_Cleaned_ID,
+  Sequential_ID = 1:nrow(unique_parcels_spatial)
+)
+
+cat("Field mapping created: 1 to", nrow(field_mapping), "\n")
+
+unique_parcels_spatial <- unique_parcels_spatial %>%
+  left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+  arrange(Sequential_ID)
+
+# ============================================================================
+# STEP 3: CREATE SPATIAL WEIGHTS MATRIX W.P1
+# ============================================================================
+cat("\n🔗 CREATING SHARED SPATIAL WEIGHTS MATRIX:\n")
+cat("=", rep("=", 42), "\n", sep="")
+
+cat("Computing boundary-to-boundary distances (this may take time)...\n")
+
+boundaries <- st_boundary(unique_parcels_spatial)
+dist_matrix <- st_distance(boundaries, boundaries)
+dist_matrix <- units::drop_units(dist_matrix)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated:", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+
+DISTANCE_THRESHOLD <- 110
+cat("Using distance threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+W.P1_complete <- matrix(0, nrow = nrow(unique_parcels_spatial), ncol = nrow(unique_parcels_spatial))
+W.P1_complete[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+diag(W.P1_complete) <- 0
+rownames(W.P1_complete) <- colnames(W.P1_complete) <- 1:nrow(W.P1_complete)
+
+n_connections <- sum(W.P1_complete)
+avg_neighbors <- n_connections / nrow(unique_parcels_spatial)
+
+cat("✅ W.P1 matrix created:\n")
+cat("• Dimensions:", nrow(W.P1_complete), "x", ncol(W.P1_complete), "\n")
+cat("• Total connections:", n_connections, "\n")
+cat("• Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+
+# ============================================================================
+# STEP 4: PREPARE SHARED TEMPORAL STRUCTURE
+# ============================================================================
+years_unique <- sort(unique(parcelles_complete$Year))
+n_years <- length(years_unique)
+year_mapping <- data.frame(
+  Year = years_unique,
+  ID.Year = 1:n_years
+)
+
+cat("Years mapped:", min(years_unique), "to", max(years_unique), "(", n_years, "years)\n")
+
+# ============================================================================
+# ILR TRANSFORMATION FUNCTIONS
+# ============================================================================
+
+create_ilr_basis <- function(D) {
+  V <- matrix(0, nrow = D - 1, ncol = D)
+  for (i in 1:(D - 1)) {
+    V[i, 1:i] <- 1/i
+    V[i, i + 1] <- -1
+    V[i, ] <- V[i, ] * sqrt(i / (i + 1))
+  }
+  return(V)
+}
+
+ilr_transform <- function(composition_matrix) {
+  D <- ncol(composition_matrix)
+  V <- create_ilr_basis(D)
+  log_comp <- log(composition_matrix)
+  ilr_coords <- log_comp %*% t(V)
+  return(ilr_coords)
+}
+
+ilr_inverse <- function(ilr_matrix) {
+  D <- ncol(ilr_matrix) + 1
+  V <- create_ilr_basis(D)
+  log_comp <- ilr_matrix %*% V
+  composition <- exp(log_comp)
+  row_sums <- rowSums(composition)
+  composition <- composition / row_sums
+  return(composition)
+}
+
+# ============================================================================
+# STEP 5: DEFINE IMPUTATION FUNCTIONS
+# ============================================================================
+
+# Non-compositional imputation (same as before)
+impute_single_variable <- function(variable_name, parcelles_data, W_matrix, field_map, year_map, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING VARIABLE:", variable_name, "\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  var_values <- parcelles_data[[variable_name]]
+  n_total <- length(var_values)
+  n_available <- sum(!is.na(var_values))
+  n_missing <- n_total - n_available
+  pct_available <- round(n_available/n_total*100, 1)
+  
+  if (verbose) {
+    cat("Variable statistics:\n")
+    cat("• Total observations:", n_total, "\n")
+    cat("• Available (non-NA):", n_available, "(", pct_available, "%)\n")
+    cat("• Missing (NA):", n_missing, "(", round(n_missing/n_total*100, 1), "%)\n")
+    
+    if (n_available > 0) {
+      cat("• Min value:", round(min(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Max value:", round(max(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Mean value:", round(mean(var_values, na.rm = TRUE), 3), "\n")
+      cat("• Std deviation:", round(sd(var_values, na.rm = TRUE), 3), "\n")
+    }
+  }
+  
+  if (n_available < 10) {
+    if (verbose) cat("❌ Insufficient data (< 10 observations). Skipping variable.\n")
+    return(NULL)
+  }
+  
+  observed_data <- parcelles_data %>% filter(!is.na(.data[[variable_name]]))
+  
+  set.seed(123)
+  unique_parcels_with_data <- observed_data %>%
+    st_drop_geometry() %>%
+    dplyr::select(Final_Cleaned_ID) %>%
+    distinct() %>%
+    mutate(split = sample(c("train", "val"), n(), replace = TRUE, prob = c(0.9, 0.1)))
+  
+  parcelles_data_split <- parcelles_data %>%
+    left_join(unique_parcels_with_data, by = "Final_Cleaned_ID") %>%
+    mutate(
+      data_split = case_when(
+        is.na(.data[[variable_name]]) ~ "predict",
+        split == "train" ~ "train",
+        split == "val" ~ "validation",
+        TRUE ~ "predict"
+      )
+    ) %>%
+    dplyr::select(-split)
+  
+  train_obs <- sum(parcelles_data_split$data_split == "train")
+  val_obs <- sum(parcelles_data_split$data_split == "validation")
+  pred_obs <- sum(parcelles_data_split$data_split == "predict")
+  
+  if (verbose) {
+    cat("Data split:\n")
+    cat("• Training:", train_obs, "\n")
+    cat("• Validation:", val_obs, "\n")
+    cat("• To predict:", pred_obs, "\n")
+  }
+  
+  df_inla <- parcelles_data_split %>%
+    st_drop_geometry() %>%
+    left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+    left_join(year_map, by = "Year") %>%
+    mutate(
+      Y = case_when(
+        data_split == "train" ~ .data[[variable_name]],
+        TRUE ~ NA_real_
+      ),
+      Y_true = .data[[variable_name]],
+      ID.Field = Sequential_ID,
+      ID.Year = as.integer(ID.Year),
+      Month = as.integer(ifelse(is.na(Month), 6, Month)),
+      Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+      Var = as.factor(ifelse(is.na(Var), "Unknown", as.character(Var))),
+      irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+    ) %>%
+    filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+    arrange(ID.Field, ID.Year)
+  
+  if (max(df_inla$ID.Field) > nrow(W_matrix)) {
+    if (verbose) cat("❌ Spatial structure incompatible. Skipping variable.\n")
+    return(NULL)
+  }
+  
+  if (verbose) cat("🚀 Fitting spatio-temporal model...\n")
+  
+  start_time <- Sys.time()
+  
+  fit_result <- tryCatch({
+    prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+    
+    inla(
+      Y ~ 1 + Bloc + irrg_ty +
+        f(ID.Field, model = "besag", graph = W_matrix,
+          group = ID.Year, 
+          control.group = list(model = "ar1"),
+          hyper = list(prec = prec_prior),
+          constr = TRUE),
+      data = df_inla,
+      family = "gaussian",
+      control.predictor = list(compute = TRUE, link = 1),
+      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+      control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+      verbose = FALSE
+    )
+  }, error = function(e) {
+    if (verbose) cat("❌ Full model failed. Trying simpler model...\n")
+    
+    tryCatch({
+      inla(
+        Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE),
+        verbose = FALSE
+      )
+    }, error = function(e2) {
+      if (verbose) cat("❌ Simple model also failed:", e2$message, "\n")
+      return(NULL)
+    })
+  })
+  
+  end_time <- Sys.time()
+  fitting_time <- as.numeric(difftime(end_time, start_time, units = "mins"))
+  
+  if (is.null(fit_result) || is.null(fit_result$summary.fitted.values)) {
+    if (verbose) cat("❌ Model fitting failed completely\n")
+    return(NULL)
+  }
+  
+  if (verbose) {
+    cat("✅ Model successful! Fitting time:", round(fitting_time, 1), "minutes\n")
+    if (!is.null(fit_result$dic)) cat("DIC:", round(fit_result$dic$dic, 2), "\n")
+    if (!is.null(fit_result$waic)) cat("WAIC:", round(fit_result$waic$waic, 2), "\n")
+  }
+  
+  predictions <- fit_result$summary.fitted.values
+  
+  df_predicted <- df_inla %>%
+    mutate(
+      !!paste0(variable_name, "_predicted") := predictions$mean,
+      !!paste0(variable_name, "_predicted_sd") := predictions$sd,
+      !!paste0(variable_name, "_predicted_lower") := predictions$`0.025quant`,
+      !!paste0(variable_name, "_predicted_upper") := predictions$`0.975quant`,
+      !!paste0(variable_name, "_complete") := case_when(
+        data_split == "train" ~ Y,
+        TRUE ~ predictions$mean
+      ),
+      !!paste0(variable_name, "_prediction_type") := case_when(
+        data_split == "train" ~ "Training",
+        data_split == "validation" ~ "Validation", 
+        data_split == "predict" ~ "Predicted"
+      )
+    )
+  
+  validation_data <- df_predicted %>%
+    filter(data_split == "validation", !is.na(Y_true), !is.na(predictions$mean))
+  
+  metrics <- list(variable = variable_name)
+  
+  if (nrow(validation_data) > 5) {
+    pred_vals <- validation_data[[paste0(variable_name, "_predicted")]]
+    true_vals <- validation_data$Y_true
+    
+    ss_res <- sum((true_vals - pred_vals)^2)
+    ss_tot <- sum((true_vals - mean(true_vals))^2)
+    r_squared <- 1 - (ss_res / ss_tot)
+    
+    metrics$r_squared <- r_squared
+    metrics$correlation <- cor(true_vals, pred_vals)
+    metrics$rmse <- sqrt(mean((true_vals - pred_vals)^2))
+    metrics$mae <- mean(abs(true_vals - pred_vals))
+    metrics$mean_error <- mean(true_vals - pred_vals)
+    metrics$n_validation <- nrow(validation_data)
+    
+    in_interval <- sum(validation_data$Y_true >= validation_data[[paste0(variable_name, "_predicted_lower")]] & 
+                      validation_data$Y_true <= validation_data[[paste0(variable_name, "_predicted_upper")]])
+    metrics$coverage_prob <- in_interval / nrow(validation_data)
+    
+    if (verbose) {
+      cat("🎯 Validation Results:\n")
+      cat("• Validation obs:", metrics$n_validation, "\n")
+      cat("• R²:", round(metrics$r_squared, 4), "\n")
+      cat("• Correlation:", round(metrics$correlation, 4), "\n") 
+      cat("• RMSE:", round(metrics$rmse, 4), "\n")
+      cat("• MAE:", round(metrics$mae, 4), "\n")
+      cat("• Coverage:", round(metrics$coverage_prob * 100, 1), "%\n")
+    }
+  } else {
+    metrics$r_squared <- NA
+    metrics$correlation <- NA
+    metrics$rmse <- NA
+    metrics$mae <- NA
+    metrics$mean_error <- NA
+    metrics$n_validation <- nrow(validation_data)
+    metrics$coverage_prob <- NA
+    
+    if (verbose) cat("❌ Insufficient validation data for metrics\n")
+  }
+  
+  result <- list(
+    variable_name = variable_name,
+    model_fit = fit_result,
+    predictions = df_predicted,
+    metrics = metrics,
+    fitting_time = fitting_time,
+    n_total = n_total,
+    n_available = n_available,
+    n_missing = n_missing,
+    pct_available = pct_available
+  )
+  
+  return(result)
+}
+
+# Compositional imputation for granulometry
+impute_compositional_granulometry <- function(parcelles_data, W_matrix, field_map, year_map, verbose = TRUE) {
+  
+  if (verbose) {
+    cat("\n", "=", rep("=", 60), "\n", sep="")
+    cat("🔬 PROCESSING COMPOSITIONAL GRANULOMETRY (ILR)\n")
+    cat("=", rep("=", 60), "\n", sep="")
+  }
+  
+  parcelles_data <- parcelles_data %>%
+    mutate(obs_id = row_number())
+  
+  sampled_obs <- parcelles_data %>%
+    filter(has_complete_granulo)
+  
+  unsampled_obs <- parcelles_data %>%
+    filter(!has_complete_granulo)
+  
+  n_sampled <- nrow(sampled_obs)
+  n_unsampled <- nrow(unsampled_obs)
+  
+  if (verbose) {
+    cat("• Sampled observations:", n_sampled, "\n")
+    cat("• Unsampled observations:", n_unsampled, "\n")
+  }
+  
+  if (n_sampled < 20) {
+    if (verbose) cat("❌ Insufficient sampled observations\n")
+    return(NULL)
+  }
+  
+  comp_matrix <- sampled_obs %>%
+    st_drop_geometry() %>%
+    dplyr::select(all_of(GRANULO_FRACTIONS)) %>%
+    as.matrix()
+  
+  comp_matrix[comp_matrix <= 0] <- 0.01
+  row_sums <- rowSums(comp_matrix)
+  comp_matrix <- comp_matrix / row_sums * 100
+  
+  ilr_coords <- ilr_transform(comp_matrix / 100)
+  colnames(ilr_coords) <- paste0("ILR_", 1:4)
+  
+  if (verbose) {
+    cat("✅ ILR transformation: 5 fractions -> 4 orthonormal coordinates\n")
+  }
+  
+  sampled_obs_ilr <- sampled_obs %>%
+    bind_cols(as.data.frame(ilr_coords))
+  
+  set.seed(123)
+  unique_sampled_parcels <- sampled_obs_ilr %>%
+    st_drop_geometry() %>%
+    dplyr::select(Final_Cleaned_ID) %>%
+    distinct() %>%
+    mutate(split = sample(c("train", "val"), n(), replace = TRUE, prob = c(0.85, 0.15)))
+  
+  cat("• Unique parcels in training:", sum(unique_sampled_parcels$split == "train"), "\n")
+  cat("• Unique parcels in validation:", sum(unique_sampled_parcels$split == "val"), "\n")
+  
+  sampled_obs_split <- sampled_obs_ilr %>%
+    left_join(unique_sampled_parcels, by = "Final_Cleaned_ID") %>%
+    mutate(data_split = ifelse(split == "train", "train", "validation"))
+  
+  all_obs_for_prediction <- bind_rows(
+    sampled_obs_split %>% mutate(obs_type = "sampled"),
+    unsampled_obs %>% mutate(obs_type = "unsampled", data_split = "predict")
+  )
+  
+  train_obs <- sum(sampled_obs_split$data_split == "train")
+  val_obs <- sum(sampled_obs_split$data_split == "validation")
+  
+  if (verbose) {
+    cat("• Training observations:", train_obs, "\n")
+    cat("• Validation observations:", val_obs, "\n")
+    cat("• To predict (unsampled):", n_unsampled, "\n")
+  }
+  
+  ilr_results <- list()
+  
+  for (i in 1:4) {
+    ilr_var <- paste0("ILR_", i)
+    
+    if (verbose) cat("\n  Fitting", ilr_var, "...\n")
+    
+    df_inla <- all_obs_for_prediction %>%
+      st_drop_geometry() %>%
+      left_join(field_map, by = c("Final_Cleaned_ID" = "Original_ID")) %>%
+      left_join(year_map, by = "Year") %>%
+      mutate(
+        Y = case_when(
+          data_split == "train" ~ .data[[ilr_var]],
+          TRUE ~ NA_real_
+        ),
+        Y_true = .data[[ilr_var]],
+        ID.Field = Sequential_ID,
+        ID.Year = as.integer(ID.Year),
+        Month = as.integer(ifelse(is.na(Month), 6, Month)),
+        Bloc = as.factor(ifelse(is.na(Bloc), "Unknown", as.character(Bloc))),
+        irrg_ty = as.factor(ifelse(is.na(irrg_ty), "Unknown", as.character(irrg_ty)))
+      ) %>%
+      filter(!is.na(ID.Field), !is.na(ID.Year)) %>%
+      arrange(ID.Field, ID.Year)
+    
+    fit_result <- tryCatch({
+      prec_prior <- list(theta = list(prior = "loggamma", param = c(1, 0.005)))
+      
+      inla(
+        Y ~ 1 + Bloc + irrg_ty +
+          f(ID.Field, model = "besag", graph = W_matrix,
+            group = ID.Year, 
+            control.group = list(model = "ar1"),
+            hyper = list(prec = prec_prior),
+            constr = TRUE),
+        data = df_inla,
+        family = "gaussian",
+        control.predictor = list(compute = TRUE, link = 1),
+        control.compute = list(dic = TRUE, waic = TRUE),
+        control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      tryCatch({
+        inla(
+          Y ~ 1 + Bloc + f(ID.Field, model = "besag", graph = W_matrix, constr = TRUE),
+          data = df_inla,
+          family = "gaussian",
+          control.predictor = list(compute = TRUE, link = 1),
+          control.compute = list(dic = TRUE),
+          verbose = FALSE
+        )
+      }, error = function(e2) NULL)
+    })
+    
+    if (!is.null(fit_result)) {
+      predictions <- fit_result$summary.fitted.values
+      
+      df_predicted <- df_inla %>%
+        mutate(
+          !!paste0(ilr_var, "_predicted") := predictions$mean,
+          !!paste0(ilr_var, "_predicted_sd") := predictions$sd
+        )
+      
+      val_data <- df_predicted %>%
+        filter(data_split == "validation", !is.na(Y_true))
+      
+      metrics <- list()
+      if (nrow(val_data) > 5) {
+        pred_vals <- val_data[[paste0(ilr_var, "_predicted")]]
+        true_vals <- val_data$Y_true
+        
+        ss_res <- sum((true_vals - pred_vals)^2)
+        ss_tot <- sum((true_vals - mean(true_vals))^2)
+        
+        metrics$r_squared <- 1 - (ss_res / ss_tot)
+        metrics$rmse <- sqrt(mean((true_vals - pred_vals)^2))
+        metrics$n_val <- nrow(val_data)
+      }
+      
+      ilr_results[[ilr_var]] <- list(
+        model = fit_result,
+        predictions = df_predicted,
+        metrics = metrics
+      )
+      
+      if (verbose && !is.null(metrics$r_squared)) {
+        cat("    ✅ R² (validation):", round(metrics$r_squared, 4), 
+            "| n =", metrics$n_val, "\n")
+      }
+    } else {
+      if (verbose) cat("    ❌ Failed\n")
+      return(NULL)
+    }
+  }
+  
+  if (verbose) cat("\n🔄 Transforming back to composition...\n")
+  
+  all_predictions <- ilr_results[[1]]$predictions %>%
+    dplyr::select(obs_id, Final_Cleaned_ID, Year, data_split, obs_type,
+                  ILR_1_predicted, ILR_1_predicted_sd)
+  
+  for (i in 2:4) {
+    ilr_var <- paste0("ILR_", i)
+    pred_cols <- ilr_results[[ilr_var]]$predictions %>%
+      dplyr::select(obs_id, !!paste0(ilr_var, "_predicted"), !!paste0(ilr_var, "_predicted_sd"))
+    
+    all_predictions <- all_predictions %>%
+      left_join(pred_cols, by = "obs_id")
+  }
+  
+  ilr_pred_matrix <- all_predictions %>%
+    dplyr::select(ILR_1_predicted, ILR_2_predicted, ILR_3_predicted, ILR_4_predicted) %>%
+    as.matrix()
+  
+  comp_predicted <- ilr_inverse(ilr_pred_matrix)
+  comp_predicted_pct <- comp_predicted * 100
+  colnames(comp_predicted_pct) <- GRANULO_FRACTIONS
+  
+  if (verbose) {
+    cat("✅ ILR back-transformation complete\n")
+    sums_check <- rowSums(comp_predicted_pct)
+    cat("• Sum range:", round(min(sums_check), 2), "to", round(max(sums_check), 2), "%\n")
+  }
+  
+  final_results <- all_predictions %>%
+    bind_cols(as.data.frame(comp_predicted_pct) %>%
+                rename_with(~paste0(., "_predicted"), all_of(GRANULO_FRACTIONS)))
+  
+  for (frac in GRANULO_FRACTIONS) {
+    original_map <- all_obs_for_prediction %>%
+      st_drop_geometry() %>%
+      dplyr::select(obs_id, !!frac) %>%
+      rename(original_value = !!frac)
+    
+    final_results <- final_results %>%
+      left_join(original_map, by = "obs_id")
+    
+    pred_col <- paste0(frac, "_predicted")
+    
+    final_results[[paste0(frac, "_complete")]] <- ifelse(
+      final_results$data_split == "train",
+      final_results$original_value,
+      final_results[[pred_col]]
+    )
+    
+    final_results[[paste0(frac, "_prediction_type")]] <- final_results$data_split
+    
+    final_results <- final_results %>% dplyr::select(-original_value)
+  }
+  
+  overall_metrics <- list()
+  val_subset <- final_results %>% filter(data_split == "validation")
+  
+  if (nrow(val_subset) > 5) {
+    frac_metrics <- list()
+    
+    for (frac in GRANULO_FRACTIONS) {
+      true_map <- sampled_obs_split %>%
+        filter(data_split == "validation") %>%
+        st_drop_geometry() %>%
+        dplyr::select(obs_id, !!frac) %>%
+        rename(true_val = !!frac)
+      
+      val_comparison <- val_subset %>%
+        left_join(true_map, by = "obs_id")
+      
+      if (sum(!is.na(val_comparison$true_val)) > 5) {
+        true_vals <- val_comparison$true_val
+        pred_vals <- val_comparison[[paste0(frac, "_predicted")]]
+        
+        valid_idx <- !is.na(true_vals) & !is.na(pred_vals)
+        true_vals <- true_vals[valid_idx]
+        pred_vals <- pred_vals[valid_idx]
+        
+        if (length(true_vals) > 0) {
+          ss_res <- sum((true_vals - pred_vals)^2)
+          ss_tot <- sum((true_vals - mean(true_vals))^2)
+          
+          frac_metrics[[frac]] <- list(
+            r_squared = 1 - (ss_res / ss_tot),
+            rmse = sqrt(mean((true_vals - pred_vals)^2)),
+            mae = mean(abs(true_vals - pred_vals)),
+            n = length(true_vals)
+          )
+        }
+      }
+    }
+    
+    overall_metrics$fraction_metrics <- frac_metrics
+    overall_metrics$n_validation <- nrow(val_subset)
+    
+    if (verbose) {
+      cat("\n🎯 Validation Results (Back-transformed Fractions):\n")
+      cat("• Validation observations:", nrow(val_subset), "\n")
+      for (frac in GRANULO_FRACTIONS) {
+        if (!is.null(frac_metrics[[frac]])) {
+          cat("• ", frac, ": R²=", round(frac_metrics[[frac]]$r_squared, 4),
+              " RMSE=", round(frac_metrics[[frac]]$rmse, 2), "% (n=", 
+              frac_metrics[[frac]]$n, ")\n", sep="")
+        }
+      }
+    }
+  }
+  
+  return(list(
+    predictions = final_results,
+    ilr_results = ilr_results,
+    metrics = overall_metrics,
+    n_sampled = n_sampled,
+    n_unsampled = n_unsampled
+  ))
+}
+
+# ============================================================================
+# STEP 6: PROCESS ALL VARIABLES
+# ============================================================================
+cat("\n🔄 PROCESSING ALL VARIABLES:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+all_results <- list()
+all_metrics <- data.frame()
+failed_variables <- character(0)
+
+# Process compositional granulometry first
+cat("\n[COMPOSITIONAL] Processing granulometry fractions...\n")
+
+granulo_result <- impute_compositional_granulometry(
+  parcelles_data = parcelles_complete,
+  W_matrix = W.P1_complete,
+  field_map = field_mapping,
+  year_map = year_mapping,
+  verbose = TRUE
+)
+
+if (!is.null(granulo_result)) {
+  all_results[["Granulometry_Compositional"]] <- granulo_result
+  
+  if (!is.null(granulo_result$metrics$fraction_metrics)) {
+    for (frac in GRANULO_FRACTIONS) {
+      if (!is.null(granulo_result$metrics$fraction_metrics[[frac]])) {
+        metrics_row <- data.frame(
+          Variable = frac,
+          N_Total = nrow(parcelles_complete),
+          N_Available = granulo_result$n_sampled,
+          N_Missing = granulo_result$n_unsampled,
+          Pct_Available = round(granulo_result$n_sampled / nrow(parcelles_complete) * 100, 1),
+          Fitting_Time_Min = NA,
+          R_Squared = granulo_result$metrics$fraction_metrics[[frac]]$r_squared,
+          Correlation = NA,
+          RMSE = granulo_result$metrics$fraction_metrics[[frac]]$rmse,
+          MAE = granulo_result$metrics$fraction_metrics[[frac]]$mae,
+          Coverage_Prob = NA,
+          N_Validation = granulo_result$metrics$fraction_metrics[[frac]]$n,
+          DIC = NA,
+          WAIC = NA,
+          stringsAsFactors = FALSE
+        )
+        
+        all_metrics <- rbind(all_metrics, metrics_row)
+      }
+    }
+  }
+  cat("✅ SUCCESS for compositional granulometry\n")
+} else {
+  failed_variables <- c(failed_variables, GRANULO_FRACTIONS)
+  cat("❌ FAILED for compositional granulometry\n")
+}
+
+# Process non-compositional variables
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+  
+  result <- impute_single_variable(
+    variable_name = var_name,
+    parcelles_data = parcelles_complete,
+    W_matrix = W.P1_complete,
+    field_map = field_mapping,
+    year_map = year_mapping,
+    verbose = TRUE
+  )
+  
+  if (!is.null(result)) {
+    all_results[[var_name]] <- result
+    
+    metrics_row <- data.frame(
+      Variable = var_name,
+      N_Total = result$n_total,
+      N_Available = result$n_available,
+      N_Missing = result$n_missing,
+      Pct_Available = result$pct_available,
+      Fitting_Time_Min = result$fitting_time,
+      R_Squared = ifelse(is.null(result$metrics$r_squared), NA, result$metrics$r_squared),
+      Correlation = ifelse(is.null(result$metrics$correlation), NA, result$metrics$correlation),
+      RMSE = ifelse(is.null(result$metrics$rmse), NA, result$metrics$rmse),
+      MAE = ifelse(is.null(result$metrics$mae), NA, result$metrics$mae),
+      Coverage_Prob = ifelse(is.null(result$metrics$coverage_prob), NA, result$metrics$coverage_prob),
+      N_Validation = ifelse(is.null(result$metrics$n_validation), 0, result$metrics$n_validation),
+      DIC = ifelse(is.null(result$model_fit$dic), NA, result$model_fit$dic$dic),
+      WAIC = ifelse(is.null(result$model_fit$waic), NA, result$model_fit$waic$waic),
+      stringsAsFactors = FALSE
+    )
+    
+    all_metrics <- rbind(all_metrics, metrics_row)
+    cat("✅ SUCCESS for", var_name, "\n")
+  } else {
+    failed_variables <- c(failed_variables, var_name)
+    cat("❌ FAILED for", var_name, "\n")
+  }
+}
+
+# ============================================================================
+# STEP 7: COMBINE ALL PREDICTIONS
+# ============================================================================
+cat("\n🔗 COMBINING ALL PREDICTIONS:\n")
+cat("=", rep("=", 50), "\n", sep="")
+
+successful_variables <- names(all_results)
+cat("Successfully processed:", length(successful_variables), "variable groups\n")
+
+final_dataset <- parcelles_complete %>% 
+  st_drop_geometry() %>%
+  group_by(Final_Cleaned_ID, Year) %>%
+  mutate(
+    replicate_id = row_number(),
+    unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+  ) %>%
+  ungroup() %>%
+  mutate(original_row_id = row_number())
+
+final_dataset <- parcelles_complete %>%
+  mutate(original_row_id = row_number()) %>%
+  left_join(
+    final_dataset %>% dplyr::select(original_row_id, replicate_id, unique_key),
+    by = "original_row_id"
+  )
+
+replicate_summary <- final_dataset %>% 
+  st_drop_geometry() %>%
+  count(Final_Cleaned_ID, Year) %>% 
+  count(n, name = "combinations")
+
+cat("📊 REPLICATE SUMMARY:\n")
+for(i in 1:nrow(replicate_summary)) {
+  n_reps <- replicate_summary$n[i]
+  n_combinations <- replicate_summary$combinations[i]
+  cat("•", n_combinations, "combinations have", n_reps, "replicate(s) each\n")
+}
+
+# Add granulometry predictions
+if ("Granulometry_Compositional" %in% names(all_results)) {
+  cat("\n[COMPOSITIONAL] Adding granulometry predictions...\n")
+  
+  final_dataset <- final_dataset %>%
+    mutate(obs_id = row_number())
+  
+  granulo_preds <- all_results[["Granulometry_Compositional"]]$predictions
+  
+  final_dataset <- final_dataset %>%
+    left_join(
+      granulo_preds %>% 
+        dplyr::select(obs_id, matches("^Clay_|^Fine_Silt_|^Coarse_Silt_|^Fine_Sand_|^Coarse_Sand_|^ILR_")),
+      by = "obs_id"
+    )
+  
+  check_cols <- paste0(GRANULO_FRACTIONS, "_complete")
+  if (all(check_cols %in% colnames(final_dataset))) {
+    sums <- final_dataset %>%
+      st_drop_geometry() %>%
+      filter(!is.na(Clay_percent_complete)) %>%
+      rowwise() %>%
+      mutate(sum_fractions = sum(c_across(all_of(check_cols)))) %>%
+      pull(sum_fractions)
+    
+    if (length(sums) > 0) {
+      cat("  ✅ Closure verified: sum range [", 
+          round(min(sums), 2), ", ", round(max(sums), 2), "]%\n", sep="")
+    }
+  }
+  
+  final_dataset <- final_dataset %>% dplyr::select(-obs_id)
+  cat("  ✅ Compositional predictions added\n")
+}
+
+# Add non-compositional predictions
+for (i in seq_along(NON_COMPOSITIONAL_VARIABLES)) {
+  var_name <- NON_COMPOSITIONAL_VARIABLES[i]
+  
+  if (var_name %in% names(all_results)) {
+    cat("\n[", i, "/", length(NON_COMPOSITIONAL_VARIABLES), "] Processing:", var_name, "\n")
+    
+    result <- all_results[[var_name]]
+    
+    df_inla_reference <- parcelles_complete %>% 
+      st_drop_geometry() %>% 
+      left_join(field_mapping, by = c("Final_Cleaned_ID" = "Original_ID"), 
+                relationship = "many-to-one") %>%  
+      left_join(year_mapping, by = "Year", 
+                relationship = "many-to-one") %>%  
+      filter(!is.na(Sequential_ID), !is.na(ID.Year)) %>% 
+      group_by(Final_Cleaned_ID, Year) %>%
+      mutate(
+        replicate_id = row_number(),
+        unique_key = paste0(Final_Cleaned_ID, "_", Year, "_rep", replicate_id)
+      ) %>%
+      ungroup() %>%
+      mutate(original_row_id = row_number()) %>% 
+      arrange(Sequential_ID, ID.Year, replicate_id) %>%
+      mutate(inla_row_id = row_number())
+    
+    cat("  Reference dataset rows:", nrow(df_inla_reference), "\n")
+    cat("  Prediction rows:", nrow(result$predictions), "\n")
+    
+    if (nrow(df_inla_reference) == nrow(result$predictions)) {
+      predictions_aligned <- df_inla_reference %>% 
+        dplyr::select(Final_Cleaned_ID, Year, replicate_id, unique_key, original_row_id) %>% 
+        bind_cols(
+          result$predictions %>% 
+            dplyr::select(matches(paste0("^", var_name, "_")))
+        )
+      
+      if (any(duplicated(predictions_aligned$unique_key))) {
+        cat("  ❌ Still have duplicates in unique_key - this shouldn't happen!\n")
+        next
+      }
+      
+      final_dataset <- final_dataset %>% 
+        left_join(
+          predictions_aligned %>% dplyr::select(-Final_Cleaned_ID, -Year, -replicate_id, -original_row_id),
+          by = "unique_key"
+        )
+      
+      first_pred_col <- paste0(var_name, "_predicted")
+      var_cols <- colnames(final_dataset)[grepl(paste0("^", var_name), colnames(final_dataset))]
+      
+      if (first_pred_col %in% colnames(final_dataset)) {
+        non_null_count <- sum(!is.na(final_dataset[[first_pred_col]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+        check_col <- first_pred_col
+      } else if (length(var_cols) > 0) {
+        cat("  📋 Found columns:", paste(var_cols, collapse = ", "), "\n")
+        non_null_count <- sum(!is.na(final_dataset[[var_cols[1]]]))
+        cat("  ✅ Successfully added", non_null_count, "predictions for", var_name, "\n")
+        check_col <- var_cols[1]
+      } else {
+        cat("  ❌ No prediction columns found for", var_name, "\n")
+        check_col <- NULL
+      }
+      
+      if (!is.null(check_col)) {
+        replicate_dist <- final_dataset %>% 
+          st_drop_geometry() %>%
+          filter(!is.na(.data[[check_col]])) %>%
+          count(replicate_id) %>%
+          arrange(replicate_id)
+        
+        if (nrow(replicate_dist) > 0) {
+          cat("    Predictions by replicate:", paste(paste0("rep", replicate_dist$replicate_id, ":", replicate_dist$n), collapse = ", "), "\n")
+        }
+      }
+      
+    } else {
+      cat("  ❌ Row count mismatch for", var_name, "- skipping\n")
+      cat("    Reference rows:", nrow(df_inla_reference), "\n")
+      cat("    Prediction rows:", nrow(result$predictions), "\n")
+    }
+    
+    gc()
+  }
+}
+
+final_dataset <- final_dataset %>% 
+  dplyr::select(-original_row_id)
+
+cat("\n✅ Final combined dataset created\n")
+cat("• Total observations:", nrow(final_dataset), "\n")
+cat("• Total columns:", ncol(final_dataset), "\n")
+cat("• Unique combinations (Final_Cleaned_ID + Year):", length(unique(paste0(final_dataset$Final_Cleaned_ID, "_", final_dataset$Year))), "\n")
+cat("• Total replicates:", nrow(final_dataset), "\n")
+
+prediction_cols <- colnames(final_dataset)[grepl("_predicted$|_complete$", colnames(final_dataset))]
+
+if (length(prediction_cols) > 0) {
+  cat("\n📊 PREDICTION SUMMARY:\n")
+  for (col in prediction_cols) {
+    non_null_count <- sum(!is.na(final_dataset[[col]]))
+    cat("•", col, ":", non_null_count, "non-null values\n")
+    
+    if (non_null_count > 0) {
+      rep_dist <- final_dataset %>% 
+        st_drop_geometry() %>%
+        filter(!is.na(.data[[col]])) %>%
+        count(replicate_id, name = "count") %>%
+        arrange(replicate_id)
+      
+      cat("  Distribution:", paste(paste0("rep", rep_dist$replicate_id, ":", rep_dist$count), collapse = ", "), "\n")
+    }
+  }
+} else {
+  cat("\n⚠️  No prediction columns found with standard naming pattern\n")
+  cat("Available columns containing prediction variables:\n")
+  
+  all_var_names <- c(GRANULO_FRACTIONS, NON_COMPOSITIONAL_VARIABLES)
+  for (var_name in all_var_names) {
+    var_cols <- colnames(final_dataset)[grepl(var_name, colnames(final_dataset))]
+    if (length(var_cols) > 0) {
+      cat("• Variable", var_name, ":", paste(var_cols, collapse = ", "), "\n")
+      first_col <- var_cols[1]
+      non_null_vals <- final_dataset[[first_col]][!is.na(final_dataset[[first_col]])]
+      if (length(non_null_vals) > 0) {
+        cat("  Sample values:", paste(head(non_null_vals, 3), collapse = ", "), "...\n")
+        
+        rep_dist <- final_dataset %>% 
+          st_drop_geometry() %>%
+          filter(!is.na(.data[[first_col]])) %>%
+          count(replicate_id, name = "count") %>%
+          arrange(replicate_id)
+        
+        if (nrow(rep_dist) > 0) {
+          cat("  Distribution:", paste(paste0("rep", rep_dist$replicate_id, ":", rep_dist$count), collapse = ", "), "\n")
+        }
+      }
+    }
+  }
+}
+
+gc()
+
+# ============================================================================
+# STEP 8: SAVE COMPREHENSIVE OUTPUTS
+# ============================================================================
+cat("\n💾 SAVING COMPREHENSIVE OUTPUTS:\n")
+cat("=", rep("=", 35), "\n", sep="")
+
+base_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy/clean_soil_dataset/"
+
+gpkg_output <- paste0(base_path, "parcels_ALL_VARIABLES_enhanced_predictions2.gpkg")
+st_write(final_dataset, gpkg_output, delete_dsn = TRUE, quiet = TRUE)
+cat("✅ Complete dataset saved:", basename(gpkg_output), "\n")
+
+csv_output <- paste0(base_path, "parcels_ALL_VARIABLES_predictions_attributes.csv")
+st_drop_geometry(final_dataset) %>% write_csv(csv_output)
+cat("✅ Attributes saved:", basename(csv_output), "\n")
+
+metrics_output <- paste0(base_path, "ALL_VARIABLES_validation_metrics_summary.csv")
+write_csv(all_metrics, metrics_output)
+cat("✅ Metrics summary saved:", basename(metrics_output), "\n"
+```

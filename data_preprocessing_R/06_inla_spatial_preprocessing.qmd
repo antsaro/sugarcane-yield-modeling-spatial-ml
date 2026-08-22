@@ -1,0 +1,2571 @@
+---
+title: "15-09-2025_R-INLA"
+format: revealjs
+editor: visual
+---
+
+# R-INLA SPATIAL ANALYSIS: PREPROCESSING
+
+# I. Shapefile Importation
+
+This section imports the PARCELLES22324 shapefile and transforms it to UTM Zone 28N coordinates for accurate spatial analysis. The code validates geometries, filters columns to keep id, Bloc2022, and Var, calculates parcel centroids, and creates an irrigation type variable based on block classifications. Multiple visualizations verify data quality and spatial structure.
+
+```{r}
+# Load required libraries
+library(sf)
+library(ggplot2)
+library(dplyr)
+
+# Set file paths
+shp_path <- "C:/Users/U078-N800/Desktop/Ml_Internship/Spatial_Data/Bandes et Parcelles22324/PARCELLES22324.shp"
+output_folder <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy"
+
+# Create output folder if it doesn't exist
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+  cat("Created output folder:", output_folder, "\n")
+}
+
+# Import the shapefile
+cat("Importing shapefile...\n")
+parcelles <- st_read(shp_path)
+
+# Display basic information about the shapefile
+cat("\n=== SHAPEFILE OVERVIEW ===\n")
+cat("Number of features:", nrow(parcelles), "\n")
+cat("Geometry type:", unique(st_geometry_type(parcelles)), "\n")
+
+# Display CURRENT CRS information
+cat("\n=== CURRENT CRS INFORMATION ===\n")
+current_crs <- st_crs(parcelles)
+cat("Current CRS:", current_crs$input, "\n")
+cat("CRS Name:", current_crs$name, "\n")
+if (!is.null(current_crs$epsg)) {
+  cat("EPSG Code:", current_crs$epsg, "\n")
+}
+cat("Units:", current_crs$units_gdal, "\n")
+cat("Is geographic (lat/lon)?", st_is_longlat(parcelles), "\n")
+
+# Transform to UTM Zone 28N (EPSG:32628) - Senegal zone
+cat("\n=== TRANSFORMING TO UTM ZONE 28N ===\n")
+parcelles_utm <- st_transform(parcelles, crs = 32628)
+
+# Verify transformation
+new_crs <- st_crs(parcelles_utm)
+cat("New CRS:", new_crs$input, "\n")
+cat("New CRS Name:", new_crs$name, "\n")
+cat("New EPSG Code:", new_crs$epsg, "\n")
+cat("New Units:", new_crs$units_gdal, "\n")
+cat("Is geographic (lat/lon)?", st_is_longlat(parcelles_utm), "\n")
+
+# Display column names and types
+cat("\n=== ATTRIBUTE TABLE STRUCTURE ===\n")
+attr_data <- st_drop_geometry(parcelles_utm)
+col_info <- sapply(attr_data, class)
+for (i in 1:length(col_info)) {
+  cat(sprintf("%-20s: %s\n", names(col_info)[i], paste(col_info[[i]], collapse = ", ")))
+}
+
+# Display comprehensive summary of attribute table
+cat("\n=== ATTRIBUTE TABLE SUMMARY ===\n")
+cat("Number of columns (excluding geometry):", ncol(attr_data), "\n")
+cat("Number of rows:", nrow(attr_data), "\n")
+
+# Display first few rows
+cat("\n=== FIRST 6 ROWS OF ATTRIBUTE DATA ===\n")
+print(head(attr_data, 6))
+
+# Summary for each column
+cat("\n=== DETAILED COLUMN SUMMARIES ===\n")
+for (col_name in names(attr_data)) {
+  cat("\n--- Column:", col_name, "---\n")
+  col_data <- attr_data[[col_name]]
+  
+  if (is.numeric(col_data)) {
+    cat("Type: Numeric\n")
+    cat("Min:", min(col_data, na.rm = TRUE), "\n")
+    cat("Max:", max(col_data, na.rm = TRUE), "\n")
+    cat("Mean:", round(mean(col_data, na.rm = TRUE), 3), "\n")
+    cat("Median:", median(col_data, na.rm = TRUE), "\n")
+    cat("NA count:", sum(is.na(col_data)), "\n")
+  } else if (is.character(col_data) || is.factor(col_data)) {
+    cat("Type: Character/Factor\n")
+    unique_vals <- unique(col_data)
+    cat("Unique values:", length(unique_vals), "\n")
+    cat("NA count:", sum(is.na(col_data)), "\n")
+    if (length(unique_vals) <= 10) {
+      cat("Values:", paste(unique_vals, collapse = ", "), "\n")
+    } else {
+      cat("Sample values:", paste(head(unique_vals, 5), collapse = ", "), "...\n")
+    }
+    # Show frequency table for categorical data
+    if (length(unique_vals) <= 20) {
+      cat("Frequency table:\n")
+      freq_table <- table(col_data, useNA = "ifany")
+      print(freq_table)
+    }
+  } else {
+    cat("Type:", class(col_data), "\n")
+    cat("Unique values:", length(unique(col_data)), "\n")
+    cat("NA count:", sum(is.na(col_data)), "\n")
+  }
+}
+
+# Define custom theme for plotting
+custom_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5, margin = margin(b = 15)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40", margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, color = "gray50", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.3),
+    panel.grid.minor = element_line(color = "gray95", linewidth = 0.2)
+  )
+
+# Filter and keep only specific columns: id, Bloc2022, Var
+cat("\n=== FILTERING ATTRIBUTE TABLE ===\n")
+cat("Original number of columns:", ncol(st_drop_geometry(parcelles_utm)), "\n")
+
+# Check which columns exist in the dataset
+available_cols <- names(st_drop_geometry(parcelles_utm))
+cat("Available columns:", paste(available_cols, collapse = ", "), "\n")
+
+# Define the columns we want to keep
+desired_cols <- c("id", "Bloc2022", "Var")
+existing_cols <- desired_cols[desired_cols %in% available_cols]
+missing_cols <- desired_cols[!desired_cols %in% available_cols]
+
+if (length(missing_cols) > 0) {
+  cat("Warning: The following columns were not found:", paste(missing_cols, collapse = ", "), "\n")
+}
+
+cat("Keeping columns:", paste(existing_cols, collapse = ", "), "\n")
+
+# Keep only the specified columns (plus geometry)
+parcelles_filtered <- parcelles_utm[, existing_cols]
+
+cat("New number of columns:", ncol(st_drop_geometry(parcelles_filtered)), "\n")
+
+# Calculate centroids for each parcel
+cat("\n=== CALCULATING CENTROIDS ===\n")
+cat("Calculating centroids for each parcel...\n")
+
+# First, check for geometry validity and fix any issues
+cat("Checking geometry validity...\n")
+valid_geoms <- st_is_valid(parcelles_filtered)
+invalid_count <- sum(!valid_geoms, na.rm = TRUE)
+cat("Invalid geometries found:", invalid_count, "\n")
+
+# Fix invalid geometries if any
+if (invalid_count > 0) {
+  cat("Fixing invalid geometries...\n")
+  parcelles_filtered <- st_make_valid(parcelles_filtered)
+}
+
+# Check for empty geometries
+empty_geoms <- st_is_empty(parcelles_filtered)
+empty_count <- sum(empty_geoms, na.rm = TRUE)
+cat("Empty geometries found:", empty_count, "\n")
+
+# Remove empty geometries if any
+if (empty_count > 0) {
+  cat("Removing empty geometries...\n")
+  parcelles_filtered <- parcelles_filtered[!empty_geoms, ]
+}
+
+# Calculate centroids using st_point_on_surface for better results
+# st_point_on_surface guarantees the point is inside the polygon
+cat("Calculating centroids using point-on-surface method...\n")
+
+# Try both methods and use the most appropriate one
+tryCatch({
+  # Method 1: Use st_point_on_surface (guarantees point inside polygon)
+  centroids_pos <- st_point_on_surface(parcelles_filtered)
+  centroid_coords <- st_coordinates(centroids_pos)
+  
+  # Add centroid coordinates to the filtered dataset
+  parcelles_filtered$X.Centroid <- centroid_coords[, "X"]
+  parcelles_filtered$Y.Centroid <- centroid_coords[, "Y"]
+  
+  cat("Used point-on-surface method (points guaranteed inside polygons)\n")
+  
+}, error = function(e) {
+  cat("Point-on-surface failed, using geometric centroid...\n")
+  
+  # Method 2: Fallback to regular centroid
+  centroids <- st_centroid(parcelles_filtered)
+  centroid_coords <- st_coordinates(centroids)
+  
+  parcelles_filtered$X.Centroid <- centroid_coords[, "X"]
+  parcelles_filtered$Y.Centroid <- centroid_coords[, "Y"]
+  
+  cat("Used geometric centroid method\n")
+})
+
+# Verify all parcels have centroids
+na_centroids_x <- sum(is.na(parcelles_filtered$X.Centroid))
+na_centroids_y <- sum(is.na(parcelles_filtered$Y.Centroid))
+cat("Parcels with missing X centroids:", na_centroids_x, "\n")
+cat("Parcels with missing Y centroids:", na_centroids_y, "\n")
+
+# Check if we have unique IDs and centroids match
+if ("id" %in% existing_cols) {
+  unique_ids <- length(unique(parcelles_filtered[[existing_cols[existing_cols == "id"]]]))
+  total_parcels <- nrow(parcelles_filtered)
+  cat("Unique parcel IDs:", unique_ids, "\n")
+  cat("Total parcels with centroids:", total_parcels, "\n")
+  
+  if (unique_ids != total_parcels) {
+    cat("WARNING: Number of unique IDs doesn't match total parcels!\n")
+  }
+}
+
+cat("Centroids calculated successfully!\n")
+cat("X.Centroid range:", round(min(parcelles_filtered$X.Centroid, na.rm = TRUE), 2), "to", round(max(parcelles_filtered$X.Centroid, na.rm = TRUE), 2), "meters\n")
+cat("Y.Centroid range:", round(min(parcelles_filtered$Y.Centroid, na.rm = TRUE), 2), "to", round(max(parcelles_filtered$Y.Centroid, na.rm = TRUE), 2), "meters\n")
+
+# Add irrigation type variable based on Bloc2022 values
+cat("\n=== ADDING IRRIGATION TYPE VARIABLE ===\n")
+
+# Check if Bloc2022 column exists
+if ("Bloc2022" %in% names(parcelles_filtered)) {
+  # Create irrig_type variable
+  parcelles_filtered$irrig_type <- ifelse(
+    parcelles_filtered$Bloc2022 %in% c("P", "S", "V", "W"),
+    "GAG",
+    "GRV"
+  )
+  
+  
+  # Show frequency table
+  if (any(!is.na(parcelles_filtered$Bloc2022))) {
+    irrig_summary <- table(parcelles_filtered$Bloc2022, parcelles_filtered$irrig_type, useNA = "ifany")
+    cat("\nCross-tabulation of Bloc2022 vs irrig_type:\n")
+    print(irrig_summary)
+    
+    # Overall irrigation type distribution
+    irrig_freq <- table(parcelles_filtered$irrig_type, useNA = "ifany")
+    cat("\nOverall irrigation type distribution:\n")
+    print(irrig_freq)
+  } else {
+    cat("Warning: All Bloc2022 values are NA\n")
+    parcelles_filtered$irrig_type <- "GRV"  # Default for all NA
+  }
+  
+} else {
+  cat("Warning: Bloc2022 column not found. Adding default irrigation type.\n")
+  parcelles_filtered$irrig_type <- "GRV"  # Default when Bloc2022 doesn't exist
+}
+
+cat("Successfully added irrig_type variable!\n")
+
+# Display the new attribute table structure
+cat("\n=== NEW FILTERED ATTRIBUTE TABLE STRUCTURE ===\n")
+attr_data_filtered <- st_drop_geometry(parcelles_filtered)
+col_info_filtered <- sapply(attr_data_filtered, class)
+for (i in 1:length(col_info_filtered)) {
+  cat(sprintf("%-15s: %s\n", names(col_info_filtered)[i], paste(col_info_filtered[[i]], collapse = ", ")))
+}
+
+# Display first few rows of the filtered data
+cat("\n=== FIRST 6 ROWS OF FILTERED ATTRIBUTE DATA ===\n")
+print(head(attr_data_filtered, 6))
+
+# Summary of the filtered columns (including new irrig_type)
+cat("\n=== SUMMARY OF FILTERED COLUMNS ===\n")
+for (col_name in names(attr_data_filtered)) {
+  cat("\n--- Column:", col_name, "---\n")
+  col_data <- attr_data_filtered[[col_name]]
+  
+  if (is.numeric(col_data)) {
+    cat("Type: Numeric\n")
+    cat("Min:", round(min(col_data, na.rm = TRUE), 3), "\n")
+    cat("Max:", round(max(col_data, na.rm = TRUE), 3), "\n")
+    cat("Mean:", round(mean(col_data, na.rm = TRUE), 3), "\n")
+    cat("Median:", round(median(col_data, na.rm = TRUE), 3), "\n")
+    cat("NA count:", sum(is.na(col_data)), "\n")
+  } else if (is.character(col_data) || is.factor(col_data)) {
+    cat("Type: Character/Factor\n")
+    unique_vals <- unique(col_data)
+    cat("Unique values:", length(unique_vals), "\n")
+    cat("NA count:", sum(is.na(col_data)), "\n")
+    if (length(unique_vals) <= 10) {
+      cat("Values:", paste(unique_vals, collapse = ", "), "\n")
+    } else {
+      cat("Sample values:", paste(head(unique_vals, 5), collapse = ", "), "...\n")
+    }
+    # Show frequency table for categorical data
+    if (length(unique_vals) <= 20) {
+      cat("Frequency table:\n")
+      freq_table <- table(col_data, useNA = "ifany")
+      print(freq_table)
+    }
+  }
+}
+
+# Create plot with transformed data (UTM Zone 28N) using filtered data
+cat("\n=== CREATING PLOTS WITH UTM COORDINATES ===\n")
+
+# Calculate area in hectares (since UTM is in meters) 
+parcelles_filtered$area_ha <- as.numeric(st_area(parcelles_filtered)) / 10000
+
+# Basic plot with UTM coordinates using filtered data
+p1 <- ggplot(parcelles_filtered) +
+  geom_sf(fill = "lightblue", color = "darkblue", alpha = 0.7, linewidth = 0.2) +
+  labs(
+    title = "PARCELLES22324 - UTM Zone 28N Projection (Filtered Data)",
+    subtitle = paste("Filtered attributes with irrigation types | Total parcels:", nrow(parcelles_filtered)),
+    caption = paste("CRS: UTM Zone 28N | Units: meters | Total area:", 
+                   round(sum(parcelles_filtered$area_ha, na.rm = TRUE), 1), "hectares")
+  ) +
+  xlab("Easting (m)") +
+  ylab("Northing (m)") +
+  custom_theme
+
+
+
+# Optional: Create a second plot showing centroids with validation
+p2 <- ggplot(parcelles_filtered) +
+  geom_sf(fill = "lightblue", color = "darkblue", alpha = 0.5, linewidth = 0.2) +
+  geom_point(aes(x = X.Centroid, y = Y.Centroid), color = "red", size = 0.8, alpha = 0.9) +
+  labs(
+    title = "PARCELLES22324 - Parcels with Validated Centroids",
+    subtitle = paste("Red points show parcel centroids (point-on-surface method) | Total parcels:", nrow(parcelles_filtered)),
+    caption = "Blue polygons = parcels, Red points = centroids (guaranteed inside polygons)"
+  ) +
+  xlab("Easting (m)") +
+  ylab("Northing (m)") +
+  custom_theme
+
+# Create a diagnostic plot to check centroid placement
+p3 <- ggplot(parcelles_filtered) +
+  geom_sf(aes(fill = !is.na(X.Centroid)), color = "white", linewidth = 0.1) +
+  scale_fill_manual(values = c("TRUE" = "lightgreen", "FALSE" = "red"), 
+                   name = "Has Centroid", 
+                   labels = c("FALSE" = "Missing", "TRUE" = "Present")) +
+  geom_point(aes(x = X.Centroid, y = Y.Centroid), color = "darkred", size = 0.5, alpha = 0.8) +
+  labs(
+    title = "Centroid Validation Check",
+    subtitle = "Green = parcels with centroids, Red = parcels without centroids",
+    caption = paste("Total parcels:", nrow(parcelles_filtered), 
+                   "| With centroids:", sum(!is.na(parcelles_filtered$X.Centroid)))
+  ) +
+  xlab("Easting (m)") +
+  ylab("Northing (m)") +
+  custom_theme
+
+# Save the plots
+ggsave(
+  filename = file.path(output_folder, "parcelles_filtered_utm28n.png"),
+  plot = p1,
+  width = 12, height = 9, dpi = 300, bg = "white"
+)
+
+ggsave(
+  filename = file.path(output_folder, "parcelles_with_centroids.png"),
+  plot = p2,
+  width = 12, height = 9, dpi = 300, bg = "white"
+)
+
+ggsave(
+  filename = file.path(output_folder, "centroid_validation_check.png"),
+  plot = p3,
+  width = 12, height = 9, dpi = 300, bg = "white"
+)
+
+
+# Display all plots
+print(p1)
+print(p2)
+print(p3)
+
+
+# Additional validation: Check for centroids outside parcels (if any)
+cat("\n=== CENTROID VALIDATION ===\n")
+
+# Create point geometries from centroid coordinates
+centroid_points <- st_as_sf(
+  data.frame(
+    id = if("id" %in% existing_cols) parcelles_filtered[[existing_cols[existing_cols == "id"]]] else seq_len(nrow(parcelles_filtered)),
+    X = parcelles_filtered$X.Centroid,
+    Y = parcelles_filtered$Y.Centroid
+  ),
+  coords = c("X", "Y"),
+  crs = st_crs(parcelles_filtered)
+)
+
+# Check which centroids fall within their corresponding parcels
+if (nrow(centroid_points) == nrow(parcelles_filtered)) {
+  within_check <- st_within(centroid_points, parcelles_filtered, sparse = FALSE)
+  within_own_parcel <- sapply(1:nrow(parcelles_filtered), function(i) within_check[i, i])
+  
+  centroids_outside <- sum(!within_own_parcel, na.rm = TRUE)
+  cat("Centroids outside their own parcel:", centroids_outside, "\n")
+  
+  if (centroids_outside > 0) {
+    cat("These parcels have centroids outside (using point-on-surface should fix this):\n")
+    outside_indices <- which(!within_own_parcel)
+    cat("Parcel indices:", paste(head(outside_indices, 10), collapse = ", "), 
+        if(length(outside_indices) > 10) "..." else "", "\n")
+  }
+} else {
+  cat("Cannot perform within-parcel validation due to geometry mismatch\n")
+}
+
+# Save the filtered dataset as a new shapefile
+cat("\n=== SAVING FILTERED DATASET ===\n")
+output_shp_path <- file.path(output_folder, "parcelles_filtered.shp")
+st_write(parcelles_filtered, output_shp_path, delete_dsn = TRUE)
+cat("Filtered shapefile saved to:", output_shp_path, "\n")
+
+# Export attribute table as CSV for easy viewing
+csv_path <- file.path(output_folder, "parcelles_attributes.csv")
+write.csv(attr_data_filtered, csv_path, row.names = FALSE)
+cat("Attribute table saved to:", csv_path, "\n")
+```
+
+# II. SPATIAL NEIGHBORHOOD ANALYSIS
+
+```{r}
+# ===== SPATIAL NEIGHBORHOOD ANALYSIS =====
+# Load required libraries
+library(sf)
+library(ggplot2)
+library(dplyr)
+
+# Install and load spatial analysis packages if needed
+if (!requireNamespace("spdep", quietly = TRUE)) {
+  cat("Installing spdep package...\n")
+  install.packages("spdep")
+}
+library(spdep)
+
+if (!requireNamespace("units", quietly = TRUE)) {
+  install.packages("units")
+}
+library(units)
+
+cat("========================================\n")
+cat("      SPATIAL NEIGHBORHOOD ANALYSIS\n") 
+cat("========================================\n")
+
+# Assuming your filtered shapefile is called 'parcelles_filtered'
+# If you have a different name, change it here:
+shapefile <- parcelles_filtered
+
+cat("\n=== STEP 1: PREPARING SHAPEFILE FOR SPATIAL ANALYSIS ===\n")
+
+# Ensure geometries are valid
+shapefile <- st_make_valid(shapefile)
+cat("Geometries validated\n")
+
+# Add ID.Field (sequential numeric identifier for INLA)
+shapefile$ID.Field <- 1:nrow(shapefile)
+cat("Added ID.Field: 1 to", nrow(shapefile), "\n")
+
+# Check if 'id' column exists, rename to 'field' if it does
+if ("id" %in% names(shapefile)) {
+  shapefile <- shapefile %>% rename(field = id)
+  cat("Renamed 'id' column to 'field'\n")
+} else {
+  # If no 'id' column, create 'field' from ID.Field
+  shapefile$field <- shapefile$ID.Field
+  cat("Created 'field' column from ID.Field\n")
+}
+
+# Display updated structure
+cat("\nUpdated shapefile structure:\n")
+attr_data_updated <- st_drop_geometry(shapefile)
+print(names(attr_data_updated))
+cat("Total parcels:", nrow(shapefile), "\n")
+
+cat("\n=== STEP 2: CALCULATING BOUNDARY-TO-BOUNDARY DISTANCES ===\n")
+
+# Calculate boundary-to-boundary distances between all parcels
+cat("Computing pairwise distances between parcel boundaries...\n")
+cat("This may take a while for large datasets...\n")
+
+# Get parcel boundaries (exterior rings only)
+boundaries <- st_boundary(shapefile)
+
+# Calculate distance matrix (boundary to boundary)
+dist_matrix <- st_distance(boundaries, boundaries)
+
+# Convert to numeric matrix and remove units
+dist_matrix <- units::drop_units(dist_matrix)
+
+# Set diagonal to NA (parcel cannot be neighbor to itself)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated: ", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+cat("Min boundary distance:", round(min(dist_matrix, na.rm = TRUE), 2), "meters\n")
+cat("Max boundary distance:", round(max(dist_matrix, na.rm = TRUE), 2), "meters\n")
+cat("Mean boundary distance:", round(mean(dist_matrix, na.rm = TRUE), 2), "meters\n")
+
+cat("\n=== STEP 3: DISTANCE DISTRIBUTION ANALYSIS ===\n")
+
+# Extract all distances for analysis (excluding diagonal)
+all_distances <- as.vector(dist_matrix)
+all_distances <- all_distances[!is.na(all_distances)]
+
+# Calculate statistics
+dist_stats <- list(
+  min = min(all_distances),
+  q25 = quantile(all_distances, 0.25),
+  median = median(all_distances),
+  mean = mean(all_distances),
+  q75 = quantile(all_distances, 0.75),
+  q90 = quantile(all_distances, 0.90),
+  q95 = quantile(all_distances, 0.95),
+  max = max(all_distances)
+)
+
+cat("Distance Statistics (meters):\n")
+cat("Min:", round(dist_stats$min, 2), "\n")
+cat("25th percentile:", round(dist_stats$q25, 2), "\n")
+cat("Median:", round(dist_stats$median, 2), "\n")
+cat("Mean:", round(dist_stats$mean, 2), "\n")
+cat("75th percentile:", round(dist_stats$q75, 2), "\n")
+cat("90th percentile:", round(dist_stats$q90, 2), "\n")
+cat("95th percentile:", round(dist_stats$q95, 2), "\n")
+cat("Max:", round(dist_stats$max, 2), "\n")
+
+cat("\n=== STEP 4: DETERMINING OPTIMAL THRESHOLD ===\n")
+
+# Suggest multiple threshold options
+threshold_options <- c(
+  dist_stats$min + 1,                    # Just above minimum (touching parcels)
+  dist_stats$q25,                        # 25th percentile
+  dist_stats$median * 0.1,               # 10% of median
+  dist_stats$median * 0.2,               # 20% of median
+  50,                                    # Fixed 50m threshold
+  100,                                   # Fixed 100m threshold
+  200                                    # Fixed 200m threshold
+)
+
+cat("Suggested threshold options:\n")
+for (i in 1:length(threshold_options)) {
+  thresh <- threshold_options[i]
+  n_neighbors <- sum(dist_matrix <= thresh & !is.na(dist_matrix))
+  avg_neighbors <- n_neighbors / nrow(shapefile)
+  cat(sprintf("Option %d: %.1f meters (avg %.1f neighbors per parcel)\n", 
+              i, thresh, avg_neighbors))
+}
+
+# Auto-select threshold: aim for 3-8 neighbors per parcel on average
+target_neighbors <- 5
+optimal_threshold <- quantile(all_distances, 0.1)  # Start with 10th percentile
+
+# Iteratively find good threshold
+for (test_thresh in seq(10, 500, by = 10)) {
+  avg_neighbors <- sum(dist_matrix <= test_thresh & !is.na(dist_matrix)) / nrow(shapefile)
+  if (avg_neighbors >= target_neighbors) {
+    optimal_threshold <- test_thresh
+    break
+  }
+}
+
+cat("\nRecommended threshold:", round(optimal_threshold, 1), "meters\n")
+cat("(Aiming for ~", target_neighbors, "neighbors per parcel on average)\n")
+
+# Allow user to choose or use default
+DISTANCE_THRESHOLD <- optimal_threshold
+cat("Using threshold:", round(DISTANCE_THRESHOLD, 1), "meters\n")
+
+cat("\n=== STEP 5: CREATING ADJACENCY MATRIX ===\n")
+
+# Create adjacency matrix based on distance threshold
+W.P1 <- matrix(0, nrow = nrow(shapefile), ncol = nrow(shapefile))
+
+# Fill adjacency matrix: 1 if distance <= threshold, 0 otherwise
+W.P1[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+
+# Ensure diagonal is 0 (parcel not neighbor to itself)
+diag(W.P1) <- 0
+
+# Add row and column names using field values
+if ("field" %in% names(shapefile)) {
+  dimnames(W.P1)[[1]] <- dimnames(W.P1)[[2]] <- shapefile$field
+} else {
+  dimnames(W.P1)[[1]] <- dimnames(W.P1)[[2]] <- shapefile$ID.Field
+}
+
+# Calculate adjacency statistics
+n_connections <- sum(W.P1)
+avg_neighbors <- n_connections / nrow(shapefile)
+max_neighbors <- max(rowSums(W.P1))
+min_neighbors <- min(rowSums(W.P1))
+
+cat("Adjacency Matrix created:", nrow(W.P1), "x", ncol(W.P1), "\n")
+cat("Total connections:", n_connections, "\n")
+cat("Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+cat("Min neighbors:", min_neighbors, "\n")
+cat("Max neighbors:", max_neighbors, "\n")
+cat("Parcels with no neighbors:", sum(rowSums(W.P1) == 0), "\n")
+
+cat("\n=== STEP 6: CREATING REFERENCE TABLE FOR INLA ===\n")
+
+# Create reference table (map_sp equivalent)
+map_sp <- data.frame(
+  field = if("field" %in% names(shapefile)) shapefile$field else shapefile$ID.Field,
+  ID.Field = shapefile$ID.Field
+)
+
+# Ensure ID.Field is numeric
+map_sp$ID.Field <- as.numeric(map_sp$ID.Field)
+
+cat("Reference table created:\n")
+print(head(map_sp, 10))
+cat("Dimensions:", nrow(map_sp), "rows x", ncol(map_sp), "columns\n")
+
+cat("\n=== STEP 7: CREATING VISUALIZATIONS ===\n")
+
+# Set output folder (same as before or create new one)
+output_folder <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy"
+
+# Plot 1: Distance distribution histogram
+p_dist_hist <- ggplot(data.frame(distance = all_distances), aes(x = distance)) +
+  geom_histogram(bins = 50, fill = "skyblue", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = DISTANCE_THRESHOLD, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Distribution of Boundary-to-Boundary Distances",
+    subtitle = paste("Red line = Selected threshold (", round(DISTANCE_THRESHOLD, 1), "m)"),
+    x = "Distance (meters)",
+    y = "Frequency",
+    caption = paste("Total parcel pairs:", length(all_distances))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 2: Distance distribution (zoomed on lower values)
+p_dist_zoom <- ggplot(data.frame(distance = all_distances[all_distances <= quantile(all_distances, 0.95)]), 
+                      aes(x = distance)) +
+  geom_histogram(bins = 50, fill = "lightgreen", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = DISTANCE_THRESHOLD, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Distance Distribution (Zoomed - 95th Percentile)",
+    subtitle = paste("Red line = Selected threshold (", round(DISTANCE_THRESHOLD, 1), "m)"),
+    x = "Distance (meters)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 3: Number of neighbors per parcel
+neighbor_counts <- rowSums(W.P1)
+p_neighbors <- ggplot(data.frame(neighbors = neighbor_counts), aes(x = neighbors)) +
+  geom_bar(fill = "orange", alpha = 0.7, color = "black") +
+  labs(
+    title = "Distribution of Neighbor Counts",
+    subtitle = paste("Threshold:", round(DISTANCE_THRESHOLD, 1), "m | Avg neighbors:", round(avg_neighbors, 2)),
+    x = "Number of Neighbors",
+    y = "Number of Parcels"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 4: Spatial plot showing neighbor connections
+# Sample some connections to avoid overcrowding
+set.seed(123)
+sample_parcels <- sample(1:nrow(shapefile), min(50, nrow(shapefile)))
+
+# Create connection lines
+connection_lines <- data.frame()
+for (i in sample_parcels) {
+  neighbors <- which(W.P1[i, ] == 1)
+  if (length(neighbors) > 0) {
+    for (j in neighbors) {
+      connection_lines <- rbind(connection_lines, data.frame(
+        x1 = shapefile$X.Centroid[i],
+        y1 = shapefile$Y.Centroid[i],
+        x2 = shapefile$X.Centroid[j],
+        y2 = shapefile$Y.Centroid[j]
+      ))
+    }
+  }
+}
+
+p_spatial <- ggplot(shapefile) +
+  geom_sf(aes(fill = rowSums(W.P1)), color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = "Neighbors", option = "plasma") +
+  {if(nrow(connection_lines) > 0) geom_segment(data = connection_lines, 
+                                               aes(x = x1, y = y1, xend = x2, yend = y2), 
+                                               color = "red", alpha = 0.3, size = 0.2)} +
+  labs(
+    title = "Spatial Neighborhood Network",
+    subtitle = paste("Color = Number of neighbors | Red lines = Sample connections (", 
+                    nrow(connection_lines), "shown)"),
+    caption = paste("Threshold:", round(DISTANCE_THRESHOLD, 1), "m")
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Save plots
+ggsave(file.path(output_folder, "distance_distribution.png"), p_dist_hist, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "distance_distribution_zoomed.png"), p_dist_zoom, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "neighbor_counts.png"), p_neighbors, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "spatial_network.png"), p_spatial, 
+       width = 12, height = 10, dpi = 300)
+
+# Display plots
+print(p_dist_hist)
+print(p_dist_zoom)
+print(p_neighbors)
+print(p_spatial)
+
+cat("\n=== STEP 8: UPDATING MAIN SHAPEFILE ===\n")
+
+# Add ID.Field to the main parcelles_filtered object
+parcelles_filtered$ID.Field <- shapefile$ID.Field
+
+# Rename id to field if it exists
+if ("id" %in% names(parcelles_filtered) && !"field" %in% names(parcelles_filtered)) {
+  parcelles_filtered <- parcelles_filtered %>% rename(field = id)
+}
+
+cat("Updated main shapefile with ID.Field\n")
+cat("Final attribute structure:\n")
+print(names(st_drop_geometry(parcelles_filtered)))
+```
+
+## II.1. Spatial Neighborhood Analysis (Fixed 110m Threshold)
+
+This section defines spatial neighborhoods by calculating boundary-to-boundary distances between all parcels and applying a 110-meter threshold to create the adjacency matrix W.P1 required for INLA. The code generates a reference table mapping parcel IDs to sequential numbers and produces visualizations showing distance distributions and neighbor connections.
+
+```{r}
+# ===== SPATIAL NEIGHBORHOOD ANALYSIS =====
+# Load required libraries
+library(sf)
+library(ggplot2)
+library(dplyr)
+
+# Install and load spatial analysis packages if needed
+if (!requireNamespace("spdep", quietly = TRUE)) {
+  cat("Installing spdep package...\n")
+  install.packages("spdep")
+}
+library(spdep)
+
+if (!requireNamespace("units", quietly = TRUE)) {
+  install.packages("units")
+}
+library(units)
+
+cat("========================================\n")
+cat("      SPATIAL NEIGHBORHOOD ANALYSIS\n") 
+cat("========================================\n")
+
+# Assuming your filtered shapefile is called 'parcelles_filtered'
+# If you have a different name, change it here:
+shapefile <- parcelles_filtered
+
+cat("\n=== STEP 1: PREPARING SHAPEFILE FOR SPATIAL ANALYSIS ===\n")
+
+# Ensure geometries are valid
+shapefile <- st_make_valid(shapefile)
+cat("Geometries validated\n")
+
+# Add ID.Field (sequential numeric identifier for INLA)
+shapefile$ID.Field <- 1:nrow(shapefile)
+cat("Added ID.Field: 1 to", nrow(shapefile), "\n")
+
+# Check if 'id' column exists, rename to 'field' if it does
+if ("id" %in% names(shapefile)) {
+  shapefile <- shapefile %>% rename(field = id)
+  cat("Renamed 'id' column to 'field'\n")
+} else {
+  # If no 'id' column, create 'field' from ID.Field
+  shapefile$field <- shapefile$ID.Field
+  cat("Created 'field' column from ID.Field\n")
+}
+
+# Display updated structure
+cat("\nUpdated shapefile structure:\n")
+attr_data_updated <- st_drop_geometry(shapefile)
+print(names(attr_data_updated))
+cat("Total parcels:", nrow(shapefile), "\n")
+
+cat("\n=== STEP 2: CALCULATING BOUNDARY-TO-BOUNDARY DISTANCES ===\n")
+
+# Calculate boundary-to-boundary distances between all parcels
+cat("Computing pairwise distances between parcel boundaries...\n")
+cat("This may take a while for large datasets...\n")
+
+# Get parcel boundaries (exterior rings only)
+boundaries <- st_boundary(shapefile)
+
+# Calculate distance matrix (boundary to boundary)
+dist_matrix <- st_distance(boundaries, boundaries)
+
+# Convert to numeric matrix and remove units
+dist_matrix <- units::drop_units(dist_matrix)
+
+# Set diagonal to NA (parcel cannot be neighbor to itself)
+diag(dist_matrix) <- NA
+
+cat("Distance matrix calculated: ", nrow(dist_matrix), "x", ncol(dist_matrix), "\n")
+cat("Min boundary distance:", round(min(dist_matrix, na.rm = TRUE), 2), "meters\n")
+cat("Max boundary distance:", round(max(dist_matrix, na.rm = TRUE), 2), "meters\n")
+cat("Mean boundary distance:", round(mean(dist_matrix, na.rm = TRUE), 2), "meters\n")
+
+cat("\n=== STEP 3: DISTANCE DISTRIBUTION ANALYSIS ===\n")
+
+# Extract all distances for analysis (excluding diagonal)
+all_distances <- as.vector(dist_matrix)
+all_distances <- all_distances[!is.na(all_distances)]
+
+# Calculate statistics
+dist_stats <- list(
+  min = min(all_distances),
+  q25 = quantile(all_distances, 0.25),
+  median = median(all_distances),
+  mean = mean(all_distances),
+  q75 = quantile(all_distances, 0.75),
+  q90 = quantile(all_distances, 0.90),
+  q95 = quantile(all_distances, 0.95),
+  max = max(all_distances)
+)
+
+cat("Distance Statistics (meters):\n")
+cat("Min:", round(dist_stats$min, 2), "\n")
+cat("25th percentile:", round(dist_stats$q25, 2), "\n")
+cat("Median:", round(dist_stats$median, 2), "\n")
+cat("Mean:", round(dist_stats$mean, 2), "\n")
+cat("75th percentile:", round(dist_stats$q75, 2), "\n")
+cat("90th percentile:", round(dist_stats$q90, 2), "\n")
+cat("95th percentile:", round(dist_stats$q95, 2), "\n")
+cat("Max:", round(dist_stats$max, 2), "\n")
+
+cat("\n=== STEP 4: DETERMINING OPTIMAL THRESHOLD ===\n")
+
+# Suggest multiple threshold options
+threshold_options <- c(
+  dist_stats$min + 1,                    # Just above minimum (touching parcels)
+  dist_stats$q25,                        # 25th percentile
+  dist_stats$median * 0.1,               # 10% of median
+  dist_stats$median * 0.2,               # 20% of median
+  50,                                    # Fixed 50m threshold
+  100,                                   # Fixed 100m threshold
+  200                                    # Fixed 200m threshold
+)
+
+cat("Suggested threshold options:\n")
+for (i in 1:length(threshold_options)) {
+  thresh <- threshold_options[i]
+  n_neighbors <- sum(dist_matrix <= thresh & !is.na(dist_matrix))
+  avg_neighbors <- n_neighbors / nrow(shapefile)
+  cat(sprintf("Option %d: %.1f meters (avg %.1f neighbors per parcel)\n", 
+              i, thresh, avg_neighbors))
+}
+
+# Allow user to choose or use default
+DISTANCE_THRESHOLD <- 110  # Fixed threshold of 110 meters
+cat("Using fixed threshold:", DISTANCE_THRESHOLD, "meters\n")
+
+# Show what this threshold will give us
+n_neighbors_110 <- sum(dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix))
+avg_neighbors_110 <- n_neighbors_110 / nrow(shapefile)
+cat("With 110m threshold:\n")
+cat("- Total connections:", n_neighbors_110, "\n")
+cat("- Average neighbors per parcel:", round(avg_neighbors_110, 2), "\n")
+
+cat("\n=== STEP 5: CREATING ADJACENCY MATRIX ===\n")
+
+# Create adjacency matrix based on distance threshold
+W.P1 <- matrix(0, nrow = nrow(shapefile), ncol = nrow(shapefile))
+
+# Fill adjacency matrix: 1 if distance <= threshold, 0 otherwise
+W.P1[dist_matrix <= DISTANCE_THRESHOLD & !is.na(dist_matrix)] <- 1
+
+# Ensure diagonal is 0 (parcel not neighbor to itself)
+diag(W.P1) <- 0
+
+# Add row and column names using field values
+if ("field" %in% names(shapefile)) {
+  dimnames(W.P1)[[1]] <- dimnames(W.P1)[[2]] <- shapefile$field
+} else {
+  dimnames(W.P1)[[1]] <- dimnames(W.P1)[[2]] <- shapefile$ID.Field
+}
+
+# Calculate adjacency statistics
+n_connections <- sum(W.P1)
+avg_neighbors <- n_connections / nrow(shapefile)
+max_neighbors <- max(rowSums(W.P1))
+min_neighbors <- min(rowSums(W.P1))
+
+cat("Adjacency Matrix created:", nrow(W.P1), "x", ncol(W.P1), "\n")
+cat("Total connections:", n_connections, "\n")
+cat("Average neighbors per parcel:", round(avg_neighbors, 2), "\n")
+cat("Min neighbors:", min_neighbors, "\n")
+cat("Max neighbors:", max_neighbors, "\n")
+cat("Parcels with no neighbors:", sum(rowSums(W.P1) == 0), "\n")
+
+cat("\n=== STEP 6: CREATING REFERENCE TABLE FOR INLA ===\n")
+
+# Create reference table (map_sp equivalent)
+map_sp <- data.frame(
+  field = if("field" %in% names(shapefile)) shapefile$field else shapefile$ID.Field,
+  ID.Field = shapefile$ID.Field
+)
+
+# Ensure ID.Field is numeric
+map_sp$ID.Field <- as.numeric(map_sp$ID.Field)
+
+cat("Reference table created:\n")
+print(head(map_sp, 10))
+cat("Dimensions:", nrow(map_sp), "rows x", ncol(map_sp), "columns\n")
+
+cat("\n=== STEP 7: CREATING VISUALIZATIONS ===\n")
+
+# Set output folder (same as before or create new one)
+output_folder <- "C:/Users/U078-N800/Desktop/Ml_Internship/Copy"
+
+# Plot 1: Distance distribution histogram
+p_dist_hist <- ggplot(data.frame(distance = all_distances), aes(x = distance)) +
+  geom_histogram(bins = 50, fill = "skyblue", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = 110, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Distribution of Boundary-to-Boundary Distances",
+    subtitle = "Red line = Selected threshold (110m)",
+    x = "Distance (meters)",
+    y = "Frequency",
+    caption = paste("Total parcel pairs:", length(all_distances))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 2: Distance distribution (zoomed on lower values)
+p_dist_zoom <- ggplot(data.frame(distance = all_distances[all_distances <= quantile(all_distances, 0.95)]), 
+                      aes(x = distance)) +
+  geom_histogram(bins = 50, fill = "lightgreen", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = 110, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Distance Distribution (Zoomed - 95th Percentile)",
+    subtitle = "Red line = Selected threshold (110m)",
+    x = "Distance (meters)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 3: Number of neighbors per parcel
+neighbor_counts <- rowSums(W.P1)
+p_neighbors <- ggplot(data.frame(neighbors = neighbor_counts), aes(x = neighbors)) +
+  geom_bar(fill = "orange", alpha = 0.7, color = "black") +
+  labs(
+    title = "Distribution of Neighbor Counts",
+    subtitle = paste("Threshold: 110m | Avg neighbors:", round(avg_neighbors, 2)),
+    x = "Number of Neighbors",
+    y = "Number of Parcels"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+# Plot 4: Spatial plot showing neighbor connections
+# Sample some connections to avoid overcrowding
+set.seed(123)
+sample_parcels <- sample(1:nrow(shapefile), min(50, nrow(shapefile)))
+
+# Create connection lines
+connection_lines <- data.frame()
+for (i in sample_parcels) {
+  neighbors <- which(W.P1[i, ] == 1)
+  if (length(neighbors) > 0) {
+    for (j in neighbors) {
+      connection_lines <- rbind(connection_lines, data.frame(
+        x1 = shapefile$X.Centroid[i],
+        y1 = shapefile$Y.Centroid[i],
+        x2 = shapefile$X.Centroid[j],
+        y2 = shapefile$Y.Centroid[j]
+      ))
+    }
+  }
+}
+
+p_spatial <- ggplot(shapefile) +
+  geom_sf(aes(fill = rowSums(W.P1)), color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = "Neighbors", option = "plasma") +
+  {if(nrow(connection_lines) > 0) geom_segment(data = connection_lines, 
+                                               aes(x = x1, y = y1, xend = x2, yend = y2), 
+                                               color = "red", alpha = 0.3, size = 0.2)} +
+  labs(
+    title = "Spatial Neighborhood Network",
+    subtitle = paste("Color = Number of neighbors | Red lines = Sample connections (", 
+                    nrow(connection_lines), "shown)"),
+    caption = "Threshold: 110m"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Save plots
+ggsave(file.path(output_folder, "distance_distribution.png"), p_dist_hist, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "distance_distribution_zoomed.png"), p_dist_zoom, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "neighbor_counts.png"), p_neighbors, 
+       width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_folder, "spatial_network.png"), p_spatial, 
+       width = 12, height = 10, dpi = 300)
+
+# Display plots
+print(p_dist_hist)
+print(p_dist_zoom)
+print(p_neighbors)
+print(p_spatial)
+
+cat("\n=== STEP 8: UPDATING MAIN SHAPEFILE ===\n")
+
+# Add ID.Field to the main parcelles_filtered object
+parcelles_filtered$ID.Field <- shapefile$ID.Field
+
+# Rename id to field if it exists
+if ("id" %in% names(parcelles_filtered) && !"field" %in% names(parcelles_filtered)) {
+  parcelles_filtered <- parcelles_filtered %>% rename(field = id)
+}
+
+cat("Updated main shapefile with ID.Field\n")
+cat("Final attribute structure:\n")
+print(names(st_drop_geometry(parcelles_filtered)))
+```
+
+# III. Soil Data Importation
+
+This section loads the soil database, standardizes parcel names through automated cleaning and manual correspondence rules, and matches soil samples to shapefile parcels. The code generates detailed reports of matched and unmatched parcels, analyzes temporal coverage across years, and documents the matching process with comprehensive statistics.
+
+## III.1. PARCEL CORRESPONDENCE ANALYSIS
+
+```{r}
+# ============================================================================
+# PARCEL CORRESPONDENCE ANALYSIS WITH DETAILED UNMATCHED REPORTS
+# ============================================================================
+# This script analyzes correspondence between soil data and shapefile parcels
+# and creates detailed CSV reports of unmatched parcels for further investigation
+
+# Load required libraries
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(viridis)
+
+# Set working directory (adjust path as needed)
+setwd("C:/Users/U078-N800/Desktop/Ml_Internship/Copy")
+
+# ============================================================================
+# LOAD AND PROCESS SOIL DATA
+# ============================================================================
+
+cat("=== LOADING SOIL DATA ===\n")
+
+# Load the soil data
+soil_data <- read.csv("BD_soil.csv", sep = ";", dec = ",", header = TRUE, 
+                      stringsAsFactors = FALSE, fileEncoding = "latin1")
+
+# Display basic soil data information
+cat("Soil dataset dimensions:", dim(soil_data), "\n")
+cat("Number of rows:", nrow(soil_data), "\n")
+cat("Number of columns:", ncol(soil_data), "\n")
+
+# Show column names
+cat("\nSoil data column names:\n")
+print(colnames(soil_data))
+
+# Process Parc.Detaillee column - convert to uppercase
+cat("\n=== PROCESSING SOIL DATA PARC.DETAILLEE ===\n")
+
+# Convert to uppercase
+soil_data$Parc.Detaillee_UPPER <- toupper(soil_data$Parc.Detaillee)
+
+# Get unique values and create detailed soil parcel info
+unique_soil_parcels <- sort(unique(soil_data$Parc.Detaillee_UPPER))
+n_unique_soil <- length(unique_soil_parcels)
+
+# Create detailed soil parcel information
+soil_parcel_details <- soil_data %>%
+  group_by(Parc.Detaillee_UPPER) %>%
+  summarise(
+    Original_Names = paste(unique(Parc.Detaillee), collapse = "; "),
+    Sample_Count = n(),
+    Years_Sampled = paste(sort(unique(Annee[!is.na(Annee)])), collapse = ", "),
+    First_Sample_Year = min(Annee, na.rm = TRUE),
+    Last_Sample_Year = max(Annee, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(Parc.Detaillee_UPPER)
+
+cat("\n📌 SOIL DATA ANALYSIS:\n")
+cat("Number of unique parcels in soil data:", n_unique_soil, "\n")
+cat("Total soil samples:", nrow(soil_data), "\n")
+
+# ============================================================================
+# USE EXISTING PROCESSED SHAPEFILE DATA
+# ============================================================================
+
+cat("\n=== USING EXISTING PROCESSED SHAPEFILE DATA ===\n")
+
+# Use the parcelles_filtered object from previous analysis
+# Assuming parcelles_filtered is already loaded in the environment
+parcelles <- parcelles_filtered
+
+cat("Shapefile dimensions:", dim(parcelles), "\n")
+cat("Number of features:", nrow(parcelles), "\n")
+
+# Show updated shapefile column names
+cat("\nShapefile column names:\n")
+print(names(st_drop_geometry(parcelles)))
+
+# Process field column - convert to uppercase
+parcelles$field_UPPER <- toupper(parcelles$field)
+
+# Get unique values and create detailed shapefile parcel info
+unique_shp_parcels <- sort(unique(parcelles$field_UPPER))
+n_unique_shp <- length(unique_shp_parcels)
+
+# Create detailed shapefile parcel information
+shp_parcel_details <- parcelles %>%
+  st_drop_geometry() %>%
+  group_by(field_UPPER) %>%
+  summarise(
+    Original_Names = paste(unique(field), collapse = "; "),
+    Feature_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  arrange(field_UPPER)
+
+cat("\n📌 SHAPEFILE ANALYSIS:\n")
+cat("Number of unique parcel IDs in shapefile:", n_unique_shp, "\n")
+cat("Total shapefile features:", nrow(parcelles), "\n")
+
+# ============================================================================
+# ADVANCED NAME CLEANING AND MATCHING
+# ============================================================================
+
+cat("\n=== ADVANCED NAME CLEANING ===\n")
+
+# Define enhanced cleaning function
+clean_parcel_name <- function(name) {
+  if (is.na(name) || name == "") return("")
+  
+  # Convert to uppercase and remove extra spaces
+  cleaned <- toupper(trimws(name))
+  
+  # Remove special characters and standardize
+  cleaned <- gsub("[^A-Z0-9]", "", cleaned)
+  
+  # Handle common variations
+  cleaned <- gsub("PARCELLE", "PARC", cleaned)
+  cleaned <- gsub("PARCEL", "PARC", cleaned)
+  cleaned <- gsub("BLOC", "BL", cleaned)
+  cleaned <- gsub("SECTEUR", "SECT", cleaned)
+  
+  return(cleaned)
+}
+
+# Apply cleaning to soil data
+cat("Applying advanced cleaning to soil parcel names...\n")
+soil_data$Parc_CLEANED <- sapply(soil_data$Parc.Detaillee_UPPER, clean_parcel_name)
+
+# Update soil parcel details with cleaned names
+soil_parcel_details$Parc_CLEANED <- sapply(soil_parcel_details$Parc.Detaillee_UPPER, clean_parcel_name)
+
+# Get unique cleaned soil parcels
+unique_soil_cleaned <- sort(unique(soil_parcel_details$Parc_CLEANED))
+n_unique_soil_cleaned <- length(unique_soil_cleaned)
+
+# Apply cleaning to shapefile data  
+cat("Applying advanced cleaning to shapefile parcel names...\n")
+parcelles$field_CLEANED <- sapply(parcelles$field_UPPER, clean_parcel_name)
+
+# Update shapefile parcel details with cleaned names
+shp_parcel_details$field_CLEANED <- sapply(shp_parcel_details$field_UPPER, clean_parcel_name)
+
+# Get unique cleaned shapefile parcels
+unique_shp_cleaned <- sort(unique(shp_parcel_details$field_CLEANED))
+n_unique_shp_cleaned <- length(unique_shp_cleaned)
+
+# ============================================================================
+# DETAILED CORRESPONDENCE ANALYSIS
+# ============================================================================
+
+cat("\n=== DETAILED CORRESPONDENCE ANALYSIS ===\n")
+
+# Find exact matches (before cleaning)
+exact_matches <- intersect(unique_soil_parcels, unique_shp_parcels)
+n_exact_matches <- length(exact_matches)
+
+# Find matches after cleaning
+cleaned_matches <- intersect(unique_soil_cleaned, unique_shp_cleaned)
+n_cleaned_matches <- length(cleaned_matches)
+
+# Find additional matches gained from cleaning
+additional_matches <- setdiff(cleaned_matches, exact_matches)
+n_additional_matches <- length(additional_matches)
+
+# Find unmatched parcels after cleaning
+unmatched_soil_cleaned <- setdiff(unique_soil_cleaned, unique_shp_cleaned)
+unmatched_shp_cleaned <- setdiff(unique_shp_cleaned, unique_soil_cleaned)
+
+# Calculate percentages
+pct_soil_sampled_updated <- round((n_cleaned_matches / n_unique_shp_cleaned) * 100, 1)
+pct_soil_matched_updated <- round((n_cleaned_matches / n_unique_soil_cleaned) * 100, 1)
+
+cat("\n🔍 DETAILED CORRESPONDENCE RESULTS:\n")
+cat("=" , rep("=", 60), "\n", sep="")
+cat("📊 SUMMARY STATISTICS:\n")
+cat("• Unique parcels in SOIL data (cleaned):   ", sprintf("%4d", n_unique_soil_cleaned), "\n")
+cat("• Unique parcels in SHAPEFILE (cleaned):   ", sprintf("%4d", n_unique_shp_cleaned), "\n")
+cat("• EXACT matches (before cleaning):         ", sprintf("%4d", n_exact_matches), "\n")
+cat("• ADDITIONAL matches (from cleaning):      ", sprintf("%4d", n_additional_matches), "\n")
+cat("• TOTAL MATCHES (after cleaning):          ", sprintf("%4d", n_cleaned_matches), "\n")
+cat("• Unmatched SOIL parcels:                  ", sprintf("%4d", length(unmatched_soil_cleaned)), "\n")  
+cat("• Unmatched SHAPEFILE parcels:             ", sprintf("%4d", length(unmatched_shp_cleaned)), "\n")
+
+cat("\n📈 COVERAGE ANALYSIS:\n")
+cat("• Percentage of shapefile parcels with soil data: ", sprintf("%5.1f%%", pct_soil_sampled_updated), "\n")
+cat("• Percentage of soil samples with parcel match:   ", sprintf("%5.1f%%", pct_soil_matched_updated), "\n")
+
+# ============================================================================
+# CREATE DETAILED UNMATCHED PARCEL REPORTS
+# ============================================================================
+
+cat("\n=== CREATING DETAILED UNMATCHED PARCEL REPORTS ===\n")
+
+# Create output folder for reports
+output_folder <- "parcel_analysis_reports"
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+  cat("Created output folder:", output_folder, "\n")
+}
+
+# 1. UNMATCHED SOIL PARCELS REPORT
+cat("\nCreating detailed unmatched soil parcels report...\n")
+
+unmatched_soil_report <- soil_parcel_details %>%
+  filter(Parc_CLEANED %in% unmatched_soil_cleaned) %>%
+  mutate(
+    Cleaned_Name = Parc_CLEANED,
+    Original_Uppercase = Parc.Detaillee_UPPER
+  ) %>%
+  arrange(Cleaned_Name)
+
+# Add analysis columns
+unmatched_soil_report <- unmatched_soil_report %>%
+  mutate(
+    Name_Length = nchar(Cleaned_Name),
+    Contains_Numbers = grepl("[0-9]", Cleaned_Name),
+    Potential_Issue = case_when(
+      Cleaned_Name == "" ~ "Empty after cleaning",
+      Name_Length < 3 ~ "Very short name",
+      Name_Length > 20 ~ "Very long name",
+      !Contains_Numbers ~ "No numbers (may be generic)",
+      TRUE ~ "Check manually"
+    )
+  )
+
+# Save unmatched soil parcels report
+write.csv(unmatched_soil_report, 
+          file.path(output_folder, "unmatched_soil_parcels_detailed.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved detailed unmatched soil parcels report:", nrow(unmatched_soil_report), "records\n")
+
+# 2. UNMATCHED SHAPEFILE PARCELS REPORT
+cat("Creating detailed unmatched shapefile parcels report...\n")
+
+unmatched_shp_report <- shp_parcel_details %>%
+  filter(field_CLEANED %in% unmatched_shp_cleaned) %>%
+  mutate(
+    Cleaned_Name = field_CLEANED,
+    Original_Uppercase = field_UPPER
+  ) %>%
+  arrange(Cleaned_Name)
+
+# Add analysis columns
+unmatched_shp_report <- unmatched_shp_report %>%
+  mutate(
+    Name_Length = nchar(Cleaned_Name),
+    Contains_Numbers = grepl("[0-9]", Cleaned_Name),
+    Potential_Issue = case_when(
+      Cleaned_Name == "" ~ "Empty after cleaning",
+      Name_Length < 3 ~ "Very short name",
+      Name_Length > 20 ~ "Very long name",
+      !Contains_Numbers ~ "No numbers (may be generic)",
+      TRUE ~ "Check manually"
+    )
+  )
+
+# Save unmatched shapefile parcels report
+write.csv(unmatched_shp_report, 
+          file.path(output_folder, "unmatched_shapefile_parcels_detailed.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved detailed unmatched shapefile parcels report:", nrow(unmatched_shp_report), "records\n")
+```
+
+## III.2. Manual matching
+
+```{r}
+# ============================================================================
+# MANUAL CORRESPONDENCE ENHANCEMENT FOR PARCEL MATCHING
+# ============================================================================
+# This script applies manual correspondences to improve parcel matching
+# Run this AFTER the original analysis code
+
+# NOTE: This script assumes you have already run the original analysis code
+# and have the necessary objects and data loaded in your R environment
+
+cat("=== MANUAL CORRESPONDENCE ENHANCEMENT ===\n")
+cat("This script enhances the original analysis with manual correspondences\n\n")
+
+# ============================================================================
+# CREATE MANUAL CORRESPONDENCE LOOKUP TABLE
+# ============================================================================
+
+cat("=== CREATING MANUAL CORRESPONDENCE LOOKUP ===\n")
+
+# Create the manual correspondence lookup table based on your provided data
+manual_correspondences <- data.frame(
+  Original_Names_Soil = c(
+    "D1B1 0-60", "D1B1 60-120", "D 1B 3", "E10a 1", "E10B 1", "E 3a 1", 
+    "E 3B 1", "E 8B 1A", "E 8B 1B", "E8B1C", "F 2A 3", "F 8A 1", "F 9A 1", 
+    "F 9B 1", "G 1A 1", "G 1B 1", "G 2A 1", "G 2B 1", "G 3A 1", "H13A 1", 
+    "H 9A 1", "J 5A 1", "J 5B 1", "J5B ext", "K 7A 1", "K 7A 2", "KH13D", 
+    "KH13E", "KH 1B", "KH 1C", "KH 2D1", "KH 2D2", "KH 2E", "KH2 E1", 
+    "KH 2F", "KH 3A", "KH 3F", "KH 4D", "KH 9B", "KH 9K 1", "KH 9K 2", 
+    "L 3A 1", "MB 1F 1", "MB 3A 3", "MB 3F", "MB 3L", "MB 3N", "MB 3R", 
+    "MB 3T", "MB 3Y 1", "MB 5S", "MB 7A10", "MB 7A11", "MB 7C 6", "P 2B 2", 
+    "Q 7A 1", "Q 7A 2", "Q 7A 3", "Q 7A 4", "Q7B2", "Q7B3", "Q7B4", "Q7C1", 
+    "Q7C2", "R 2A2", "R 2A 4", "S 1B 1", "S 1B 2", "S 1B 3", "S 1B 4", 
+    "S 1C 1", "S 1C 2", "S 1C 3", "S 1C 4", "S 1F 1", "S 1F2", "S 1F 3", 
+    "S 1F 4", "S 1G 1", "S 1G 2", "S 1G 3", "S 1G 4", "S 1H 1", "S 1H 3", 
+    "S 2A 1", "S 2A 2", "S 2A 3", "S 2A 4", "S 2B 1", "S 2B 2", "S 2B 3", 
+    "S 2B 4", "S 2C 1", "S 2C 2", "S 2C 3", "S 2C 4", "S 2E 1", "S 2E 2", 
+    "S 2E 3", "S 2E3", "S 2E 4", "S 2F 1", "S 2F 3", "S 2G 1", "S 2G 2", 
+    "S 2G 4", "S 6(EFGH)", "S6 NÂ°1", "S6 NÂ°2", "S6 NÂ°3", "S6 NÂ°4", 
+    "T 2", "T30", "T33E 1", "T39c 1", "T 4A", "T 4B", "U 3B 1", "U 3B1", 
+    "U 3B 2", "U 3B2", "U 3K", "U 5G", "U 6C", "U 8D1"
+  ),
+  Manual_Correspondence_Shp = c(
+    "D 1B", "D 1B", "D 1B", "E10A", "E10B", "E 3A", "E 3B", "E 8B", "E 8B", 
+    "E 8B", "F 2A", "F 8A", "F 9A", "F 9B", "G 1A", "G 1B", "G 2A", "G 2B", 
+    "G 3A", "H13A", "H 9A", "J 5A", "J 5B", "J 5B", "K 7A", "K 7A", "KH13D", 
+    "KH13E", "KH 1B", "KH 1C", "KH 2D", "KH 2D", "KH 2E", "KH2 E1", "KH 2F", 
+    "KH 3A", "KH 3F", "KH 4D", "KH 9B", "KH 9K", "KH 9K", "L 3A", "MB 1F", 
+    "MB 3A", "MB 3F", "MB 3L", "MB 3N", "MB 3R", "MB 3T", "MB 3Y", "MB 5S", 
+    "MB 7A9", "MB 7A9", "MB 7C 5", "P 2B", "Q 7A", "Q 7A", "Q 7A", "Q 7A", 
+    "Q 7B", "Q 7B", "Q 7B", "Q 7C", "Q 7C", "R 2A", "R 2A", "S 1B", "S 1B", 
+    "S 1B", "S 1B", "S 1C", "S 1C", "S 1C", "S 1C", "S 1F", "S 1F", "S 1F", 
+    "S 1F", "S 1G", "S 1G", "S 1G", "S 1G", "S 1H", "S 1H", "S 2A", "S 2A", 
+    "S 2A", "S 2A", "S 2B", "S 2B", "S 2B", "S 2B", "S 2C", "S 2C", "S 2C", 
+    "S 2C", "S 2E", "S 2E", "S 2E", "S 2E", "S 2E", "S 2F", "S 2F", "S 2G", 
+    "S 2G", "S 2G", "S 6E", "S 6A", "S 6A", "S 6A", "S 6A", "T 2A", "T30", 
+    "T33E", "T39C", "T 4", "T 4", "U 3B", "U 3B", "U 3B", "U 3B", "U 3K", 
+    "U 5G", "U 6C", "U 8D"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Convert to uppercase for matching consistency
+manual_correspondences$Original_Names_Soil_UPPER <- toupper(manual_correspondences$Original_Names_Soil)
+manual_correspondences$Manual_Correspondence_Shp_UPPER <- toupper(manual_correspondences$Manual_Correspondence_Shp)
+
+cat("Manual correspondence entries created:", nrow(manual_correspondences), "\n")
+
+# ============================================================================
+# APPLY MANUAL CORRESPONDENCES TO SOIL DATA
+# ============================================================================
+
+cat("\n=== APPLYING MANUAL CORRESPONDENCES ===\n")
+
+# Create a copy of soil data for manual corrections
+soil_data_manual <- soil_data
+
+# Apply manual correspondences
+cat("Applying manual correspondences to soil data...\n")
+soil_data_manual$Parc_Manual_Corrected <- soil_data_manual$Parc.Detaillee_UPPER
+
+# Apply manual correspondences
+corrections_applied <- 0
+for (i in 1:nrow(manual_correspondences)) {
+  soil_original <- manual_correspondences$Original_Names_Soil_UPPER[i]
+  shp_corrected <- manual_correspondences$Manual_Correspondence_Shp_UPPER[i]
+  
+  # Count records that will be updated
+  matches <- soil_data_manual$Parc.Detaillee_UPPER == soil_original
+  corrections_applied <- corrections_applied + sum(matches, na.rm = TRUE)
+  
+  # Update soil data where original name matches
+  soil_data_manual$Parc_Manual_Corrected[matches] <- shp_corrected
+}
+
+cat("Manual corrections applied to", corrections_applied, "soil records\n")
+
+# Apply cleaning function to manually corrected data
+soil_data_manual$Parc_Manual_CLEANED <- sapply(soil_data_manual$Parc_Manual_Corrected, clean_parcel_name)
+
+# Create updated soil parcel details with manual corrections
+soil_parcel_details_manual <- soil_data_manual %>%
+  group_by(Parc_Manual_Corrected) %>%
+  summarise(
+    Original_Names = paste(unique(Parc.Detaillee), collapse = "; "),
+    Original_Names_Upper = paste(unique(Parc.Detaillee_UPPER), collapse = "; "),
+    Sample_Count = n(),
+    Years_Sampled = paste(sort(unique(Annee[!is.na(Annee)])), collapse = ", "),
+    First_Sample_Year = min(Annee, na.rm = TRUE),
+    Last_Sample_Year = max(Annee, na.rm = TRUE),
+    Manual_Correction_Applied = any(Parc.Detaillee_UPPER != Parc_Manual_Corrected),
+    .groups = 'drop'
+  ) %>%
+  arrange(Parc_Manual_Corrected)
+
+# Add cleaned names
+soil_parcel_details_manual$Parc_Manual_CLEANED <- sapply(soil_parcel_details_manual$Parc_Manual_Corrected, clean_parcel_name)
+
+# Get unique manually corrected and cleaned parcels
+unique_soil_manual_cleaned <- sort(unique(soil_parcel_details_manual$Parc_Manual_CLEANED))
+n_unique_soil_manual <- length(unique_soil_manual_cleaned)
+
+# ============================================================================
+# ENHANCED CORRESPONDENCE ANALYSIS WITH MANUAL CORRECTIONS
+# ============================================================================
+
+cat("\n=== ENHANCED CORRESPONDENCE ANALYSIS ===\n")
+
+# Find matches after manual corrections
+manual_matches <- intersect(unique_soil_manual_cleaned, unique_shp_cleaned)
+n_manual_matches <- length(manual_matches)
+
+# Calculate improvement from manual correspondences
+improvement_from_manual <- n_manual_matches - n_cleaned_matches
+
+# Find remaining unmatched parcels
+unmatched_soil_manual <- setdiff(unique_soil_manual_cleaned, unique_shp_cleaned)
+unmatched_shp_manual <- setdiff(unique_shp_cleaned, unique_soil_manual_cleaned)
+
+# Calculate updated percentages
+pct_soil_sampled_manual <- round((n_manual_matches / n_unique_shp_cleaned) * 100, 1)
+pct_soil_matched_manual <- round((n_manual_matches / n_unique_soil_manual) * 100, 1)
+
+cat("\n🔍 ENHANCED CORRESPONDENCE RESULTS WITH MANUAL CORRECTIONS:\n")
+cat("=" , rep("=", 70), "\n", sep="")
+cat("📊 COMPARISON STATISTICS:\n")
+cat("• ORIGINAL matches (before manual):            ", sprintf("%4d", n_cleaned_matches), "\n")
+cat("• ENHANCED matches (after manual):             ", sprintf("%4d", n_manual_matches), "\n")
+cat("• IMPROVEMENT from manual correspondences:     ", sprintf("%4d", improvement_from_manual), "\n")
+cat("• Remaining unmatched SOIL parcels:            ", sprintf("%4d", length(unmatched_soil_manual)), "\n")
+cat("• Remaining unmatched SHAPEFILE parcels:       ", sprintf("%4d", length(unmatched_shp_manual)), "\n")
+
+cat("\n📈 ENHANCED COVERAGE ANALYSIS:\n")
+cat("• Original coverage: ", sprintf("%5.1f%%", pct_soil_sampled_updated), " → Enhanced: ", sprintf("%5.1f%%", pct_soil_sampled_manual), "\n")
+cat("• Coverage improvement: ", sprintf("+%.1f%%", pct_soil_sampled_manual - pct_soil_sampled_updated), "\n")
+
+# ============================================================================
+# CREATE ENHANCED REPORTS WITH MANUAL CORRECTIONS
+# ============================================================================
+
+cat("\n=== CREATING ENHANCED REPORTS ===\n")
+
+# Create enhanced output folder
+output_folder_manual <- "parcel_analysis_enhanced_with_manual"
+if (!dir.exists(output_folder_manual)) {
+  dir.create(output_folder_manual)
+  cat("Created enhanced output folder:", output_folder_manual, "\n")
+}
+
+# 1. ENHANCED MATCHED PARCELS REPORT
+cat("\nCreating enhanced matched parcels report...\n")
+
+matched_soil_manual <- soil_parcel_details_manual %>%
+  filter(Parc_Manual_CLEANED %in% manual_matches)
+
+matched_shp_manual <- shp_parcel_details %>%
+  filter(field_CLEANED %in% manual_matches)
+
+enhanced_matched_report <- matched_soil_manual %>%
+  left_join(matched_shp_manual, by = c("Parc_Manual_CLEANED" = "field_CLEANED")) %>%
+  mutate(
+    Cleaned_Name = Parc_Manual_CLEANED,
+    Manual_Corrected_Name = Parc_Manual_Corrected,
+    Soil_Original_Names = Original_Names.x,
+    Soil_Original_Names_Upper = Original_Names_Upper,
+    Shapefile_Original_Names = Original_Names.y,
+    Shapefile_Feature_Count = Feature_Count
+  ) %>%
+  arrange(Cleaned_Name)
+
+write.csv(enhanced_matched_report, 
+          file.path(output_folder_manual, "enhanced_matched_parcels_with_manual.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved enhanced matched parcels report:", nrow(enhanced_matched_report), "records\n")
+
+# 2. REMAINING UNMATCHED SOIL PARCELS (AFTER MANUAL CORRECTIONS)
+cat("Creating remaining unmatched soil parcels report...\n")
+
+remaining_unmatched_soil <- soil_parcel_details_manual %>%
+  filter(Parc_Manual_CLEANED %in% unmatched_soil_manual) %>%
+  mutate(
+    Cleaned_Name = Parc_Manual_CLEANED,
+    Manual_Corrected_Name = Parc_Manual_Corrected,
+    Name_Length = nchar(Parc_Manual_CLEANED),
+    Contains_Numbers = grepl("[0-9]", Parc_Manual_CLEANED),
+    Potential_Issue = case_when(
+      Parc_Manual_CLEANED == "" ~ "Empty after cleaning",
+      Name_Length < 3 ~ "Very short name",
+      Name_Length > 20 ~ "Very long name",
+      !Contains_Numbers ~ "No numbers (may be generic)",
+      TRUE ~ "Requires further investigation"
+    )
+  ) %>%
+  arrange(Cleaned_Name)
+
+write.csv(remaining_unmatched_soil, 
+          file.path(output_folder_manual, "remaining_unmatched_soil_after_manual.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved remaining unmatched soil parcels:", nrow(remaining_unmatched_soil), "records\n")
+
+# 3. REMAINING UNMATCHED SHAPEFILE PARCELS
+remaining_unmatched_shp <- shp_parcel_details %>%
+  filter(field_CLEANED %in% unmatched_shp_manual) %>%
+  mutate(
+    Cleaned_Name = field_CLEANED,
+    Original_Uppercase = field_UPPER,
+    Name_Length = nchar(field_CLEANED),
+    Contains_Numbers = grepl("[0-9]", field_CLEANED),
+    Potential_Issue = case_when(
+      field_CLEANED == "" ~ "Empty after cleaning",
+      Name_Length < 3 ~ "Very short name",
+      Name_Length > 20 ~ "Very long name",
+      !Contains_Numbers ~ "No numbers (may be generic)",
+      TRUE ~ "Needs soil sampling"
+    )
+  ) %>%
+  arrange(Cleaned_Name)
+
+write.csv(remaining_unmatched_shp, 
+          file.path(output_folder_manual, "remaining_unmatched_shapefile_after_manual.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved remaining unmatched shapefile parcels:", nrow(remaining_unmatched_shp), "records\n")
+
+# 4. MANUAL CORRESPONDENCE IMPACT ANALYSIS
+cat("Creating manual correspondence impact analysis...\n")
+
+manual_impact_analysis <- manual_correspondences %>%
+  left_join(
+    soil_data_manual %>% 
+      group_by(Parc.Detaillee_UPPER) %>% 
+      summarise(Sample_Count = n(), .groups = 'drop'),
+    by = c("Original_Names_Soil_UPPER" = "Parc.Detaillee_UPPER")
+  ) %>%
+  mutate(
+    Found_In_Shapefile = Manual_Correspondence_Shp_UPPER %in% unique_shp_parcels,
+    # Check if the CLEANED version of the manual correspondence matches
+    Manual_Cleaned = sapply(Manual_Correspondence_Shp_UPPER, clean_parcel_name),
+    Correction_Successful = Manual_Cleaned %in% manual_matches,
+    Sample_Count = ifelse(is.na(Sample_Count), 0, Sample_Count),
+    Status = case_when(
+      Sample_Count == 0 ~ "No samples found",
+      !Found_In_Shapefile ~ "Target not in shapefile",
+      Correction_Successful ~ "Successfully matched",
+      TRUE ~ "Match failed (cleaning issue?)"
+    )
+  ) %>%
+  arrange(Original_Names_Soil)
+
+write.csv(manual_impact_analysis, 
+          file.path(output_folder_manual, "manual_correspondence_impact_analysis.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+# Create summary of manual correspondence success
+manual_success_summary <- manual_impact_analysis %>%
+  count(Status) %>%
+  mutate(Percentage = round(n / nrow(manual_impact_analysis) * 100, 1))
+
+cat("✓ Saved manual correspondence impact analysis:", nrow(manual_impact_analysis), "records\n")
+
+# 5. ENHANCED COMPREHENSIVE SUMMARY
+cat("Creating enhanced comprehensive summary...\n")
+
+enhanced_summary <- data.frame(
+  Category = c(
+    "=== ORIGINAL ANALYSIS ===",
+    "Original Soil Parcels (Cleaned)",
+    "Original Shapefile Parcels (Cleaned)", 
+    "Original Matches",
+    "Original Unmatched Soil",
+    "Original Unmatched Shapefile",
+    "Original Coverage Percentage",
+    "",
+    "=== MANUAL ENHANCEMENT ===",
+    "Manual Correspondence Entries",
+    "Soil Records Corrected",
+    "Enhanced Matches",
+    "Improvement from Manual Corrections",
+    "Remaining Unmatched Soil",
+    "Remaining Unmatched Shapefile", 
+    "Enhanced Coverage Percentage",
+    "Coverage Improvement",
+    "",
+    "=== MANUAL CORRESPONDENCE SUCCESS ===",
+    "Successfully Matched",
+    "Target Not in Shapefile",
+    "Match Failed",
+    "No Samples Found"
+  ),
+  Value = c(
+    "",
+    n_unique_soil_cleaned,
+    n_unique_shp_cleaned,
+    n_cleaned_matches,
+    length(unmatched_soil_cleaned),
+    length(unmatched_shp_cleaned),
+    paste0(pct_soil_sampled_updated, "%"),
+    "",
+    "",
+    nrow(manual_correspondences),
+    corrections_applied,
+    n_manual_matches,
+    improvement_from_manual,
+    length(unmatched_soil_manual),
+    length(unmatched_shp_manual),
+    paste0(pct_soil_sampled_manual, "%"),
+    paste0("+", pct_soil_sampled_manual - pct_soil_sampled_updated, "%"),
+    "",
+    "",
+    sum(manual_success_summary$n[manual_success_summary$Status == "Successfully matched"]),
+    sum(manual_success_summary$n[manual_success_summary$Status == "Target not in shapefile"]),
+    sum(manual_success_summary$n[manual_success_summary$Status == "Match failed"]),
+    sum(manual_success_summary$n[manual_success_summary$Status == "No samples found"])
+  )
+)
+
+write.csv(enhanced_summary, 
+          file.path(output_folder_manual, "enhanced_comprehensive_summary.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved enhanced comprehensive summary\n")
+
+# 6. ENHANCED YEARLY ANALYSIS
+cat("Creating enhanced yearly analysis...\n")
+
+enhanced_yearly_analysis <- data.frame()
+
+for (year in unique_years) {
+  year_data <- soil_data_manual[soil_data_manual$Annee == year & !is.na(soil_data_manual$Annee), ]
+  
+  # Get unique parcels for this year (manually corrected and cleaned)
+  year_parcels_cleaned <- unique(year_data$Parc_Manual_CLEANED)
+  year_parcels_cleaned <- year_parcels_cleaned[year_parcels_cleaned != ""]
+  
+  # Find matches and unmatched
+  year_matches <- intersect(year_parcels_cleaned, unique_shp_cleaned)
+  year_unmatched <- setdiff(year_parcels_cleaned, unique_shp_cleaned)
+  
+  # Calculate improvement for this year
+  year_data_original <- soil_data[soil_data$Annee == year & !is.na(soil_data$Annee), ]
+  year_parcels_original <- unique(year_data_original$Parc_CLEANED)
+  year_parcels_original <- year_parcels_original[year_parcels_original != ""]
+  year_matches_original <- intersect(year_parcels_original, unique_shp_cleaned)
+  year_improvement <- length(year_matches) - length(year_matches_original)
+  
+  enhanced_yearly_analysis <- rbind(enhanced_yearly_analysis, data.frame(
+    Year = year,
+    Total_Samples = nrow(year_data),
+    Unique_Parcels_Sampled = length(year_parcels_cleaned),
+    Original_Matched_Parcels = length(year_matches_original),
+    Enhanced_Matched_Parcels = length(year_matches),
+    Improvement_from_Manual = year_improvement,
+    Remaining_Unmatched = length(year_unmatched),
+    Original_Coverage_Pct = round((length(year_matches_original) / n_unique_shp_cleaned) * 100, 1),
+    Enhanced_Coverage_Pct = round((length(year_matches) / n_unique_shp_cleaned) * 100, 1),
+    Enhanced_Match_Rate = round((length(year_matches) / length(year_parcels_cleaned)) * 100, 1)
+  ))
+}
+
+write.csv(enhanced_yearly_analysis, 
+          file.path(output_folder_manual, "enhanced_yearly_analysis.csv"), 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✓ Saved enhanced yearly analysis\n")
+
+# ============================================================================
+# FINAL SUMMARY AND RECOMMENDATIONS
+# ============================================================================
+
+cat("\n" , rep("=", 80), "\n", sep="")
+cat("🎯 MANUAL CORRESPONDENCE ENHANCEMENT COMPLETE!\n")
+cat(rep("=", 80), "\n")
+
+cat("\n📋 ENHANCED FILES CREATED IN '", output_folder_manual, "':\n", sep="")
+cat("1. enhanced_matched_parcels_with_manual.csv          (", nrow(enhanced_matched_report), " records)\n")
+cat("2. remaining_unmatched_soil_after_manual.csv         (", nrow(remaining_unmatched_soil), " records)\n")
+cat("3. remaining_unmatched_shapefile_after_manual.csv    (", nrow(remaining_unmatched_shp), " records)\n")
+cat("4. manual_correspondence_impact_analysis.csv         (", nrow(manual_impact_analysis), " records)\n")
+cat("5. enhanced_comprehensive_summary.csv                (overview)\n")
+cat("6. enhanced_yearly_analysis.csv                      (yearly breakdown)\n")
+
+cat("\n📊 ENHANCEMENT IMPACT:\n")
+cat("• Manual correspondences processed:    ", nrow(manual_correspondences), "\n")
+cat("• Soil records corrected:              ", corrections_applied, "\n")
+cat("• Matching improvement:                ", improvement_from_manual, " additional matches\n")
+cat("• Original coverage (cleaned):         ", pct_soil_sampled_updated, "%\n")
+cat("• Enhanced coverage (direct):          ", pct_soil_sampled_manual, "%\n")
+cat("• Coverage improvement:                +", pct_soil_sampled_manual - pct_soil_sampled_updated, "%\n")
+
+# Show manual correspondence success breakdown
+cat("\n📈 MANUAL CORRESPONDENCE SUCCESS RATE:\n")
+for (i in 1:nrow(manual_success_summary)) {
+  status <- manual_success_summary$Status[i]
+  count <- manual_success_summary$n[i]
+  percentage <- manual_success_summary$Percentage[i]
+  cat("• ", sprintf("%-25s", status), ": ", sprintf("%3d", count), " (", sprintf("%4.1f%%", percentage), ")\n", sep="")
+}
+
+
+improvement_rate <- round((improvement_from_manual / n_cleaned_matches) * 100, 1)
+cat("• Manual corrections improved matching by ", improvement_rate, "%\n", sep="")
+```
+
+## III.3. Soil Data Variables Explorer
+
+This section examines all variables in the soil database, classifying them by type and assessing data completeness. The code creates an inventory showing each variable's structure, missing data patterns, and sample values to guide variable selection for analysis.
+
+```{r}
+# ============================================================================
+# SOIL DATA VARIABLES EXPLORER
+# ============================================================================
+# This script examines all variables in the soil dataset to help you decide
+# which variables to keep for parcel linking analysis
+
+cat("=== SOIL DATA VARIABLES EXPLORER ===\n")
+
+# Ensure soil data is loaded (assuming from your previous analysis)
+if (!exists("soil_data")) {
+  cat("Loading soil data...\n")
+  soil_data <- read.csv("BD_soil.csv", sep = ";", dec = ",", header = TRUE, 
+                        stringsAsFactors = FALSE, fileEncoding = "latin1")
+}
+
+# ============================================================================
+# BASIC DATASET INFORMATION
+# ============================================================================
+
+cat("📊 BASIC DATASET INFORMATION:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+cat("Dataset dimensions:", nrow(soil_data), "rows ×", ncol(soil_data), "columns\n")
+cat("Total observations:", nrow(soil_data), "\n")
+cat("Number of variables:", ncol(soil_data), "\n\n")
+
+# ============================================================================
+# DETAILED VARIABLE ANALYSIS
+# ============================================================================
+
+cat("🔍 DETAILED VARIABLE ANALYSIS:\n")
+cat("=" , rep("=", 80), "\n", sep="")
+
+# Create a comprehensive variable summary
+variable_summary <- data.frame(
+  Variable_Number = 1:ncol(soil_data),
+  Variable_Name = names(soil_data),
+  Data_Type = sapply(soil_data, class),
+  Non_Missing_Count = sapply(soil_data, function(x) sum(!is.na(x))),
+  Missing_Count = sapply(soil_data, function(x) sum(is.na(x))),
+  Unique_Values = sapply(soil_data, function(x) length(unique(x[!is.na(x)]))),
+  stringsAsFactors = FALSE
+)
+
+# Calculate percentages
+variable_summary$Missing_Percentage <- round((variable_summary$Missing_Count / nrow(soil_data)) * 100, 1)
+variable_summary$Complete_Percentage <- round((variable_summary$Non_Missing_Count / nrow(soil_data)) * 100, 1)
+
+# Add sample values for each variable
+variable_summary$Sample_Values <- sapply(names(soil_data), function(var_name) {
+  values <- soil_data[[var_name]][!is.na(soil_data[[var_name]])]
+  if (length(values) == 0) {
+    return("All NA")
+  } else if (length(values) <= 3) {
+    return(paste(values, collapse = ", "))
+  } else {
+    return(paste(values[1:3], collapse = ", "))
+  }
+})
+
+# Add variable classification
+variable_summary$Variable_Type <- sapply(1:nrow(variable_summary), function(i) {
+  var_name <- variable_summary$Variable_Name[i]
+  unique_vals <- variable_summary$Unique_Values[i]
+  data_type <- variable_summary$Data_Type[i]
+  
+  if (grepl("Parc|parc", var_name, ignore.case = TRUE)) {
+    return("Parcel_ID")
+  } else if (grepl("Annee|Year|year", var_name, ignore.case = TRUE)) {
+    return("Time")
+  } else if (grepl("Date|date", var_name, ignore.case = TRUE)) {
+    return("Date")
+  } else if (data_type %in% c("character", "factor") && unique_vals <= 20) {
+    return("Categorical")
+  } else if (data_type %in% c("character", "factor")) {
+    return("Text/ID")
+  } else if (data_type %in% c("numeric", "integer")) {
+    return("Numeric")
+  } else {
+    return("Other")
+  }
+})
+
+# Sort by variable number for easy reference
+variable_summary <- variable_summary[order(variable_summary$Variable_Number), ]
+
+# ============================================================================
+# DISPLAY VARIABLE SUMMARY TABLE
+# ============================================================================
+
+cat("📋 COMPLETE VARIABLE SUMMARY:\n")
+cat(sprintf("%-3s %-25s %-12s %-8s %-8s %-8s %-8s %-12s %-20s\n", 
+           "No.", "Variable_Name", "Data_Type", "Complete", "Missing", "Missing%", "Unique", "Category", "Sample_Values"))
+cat(rep("-", 120), "\n")
+
+for (i in 1:nrow(variable_summary)) {
+  cat(sprintf("%-3d %-25s %-12s %-8d %-8d %-8.1f %-8d %-12s %-20s\n",
+             variable_summary$Variable_Number[i],
+             substr(variable_summary$Variable_Name[i], 1, 25),
+             variable_summary$Data_Type[i],
+             variable_summary$Non_Missing_Count[i],
+             variable_summary$Missing_Count[i],
+             variable_summary$Missing_Percentage[i],
+             variable_summary$Unique_Values[i],
+             variable_summary$Variable_Type[i],
+             substr(variable_summary$Sample_Values[i], 1, 20)
+             ))
+}
+
+# ============================================================================
+# VARIABLE CATEGORIES BREAKDOWN
+# ============================================================================
+
+cat("\n📊 VARIABLES BY CATEGORY:\n")
+cat("=" , rep("=", 40), "\n", sep="")
+
+category_counts <- table(variable_summary$Variable_Type)
+for (category in names(category_counts)) {
+  cat(sprintf("%-15s: %d variables\n", category, category_counts[category]))
+}
+
+# ============================================================================
+# DETAILED BREAKDOWN BY CATEGORY
+# ============================================================================
+
+cat("\n🔍 DETAILED BREAKDOWN BY CATEGORY:\n")
+
+for (category in unique(variable_summary$Variable_Type)) {
+  cat("\n", rep("-", 60), "\n", sep="")
+  cat("📂 ", toupper(category), " VARIABLES:\n", sep="")
+  cat(rep("-", 60), "\n")
+  
+  category_vars <- variable_summary[variable_summary$Variable_Type == category, ]
+  
+  for (i in 1:nrow(category_vars)) {
+    var_info <- category_vars[i, ]
+    cat(sprintf("%2d. %-25s [%s] - %.1f%% complete, %d unique values\n",
+               var_info$Variable_Number,
+               var_info$Variable_Name,
+               var_info$Data_Type,
+               var_info$Complete_Percentage,
+               var_info$Unique_Values))
+    
+    # Show sample values for this variable
+    cat(sprintf("    Sample values: %s\n", var_info$Sample_Values))
+    
+    # For numeric variables, show additional statistics
+    if (var_info$Data_Type %in% c("numeric", "integer") && var_info$Non_Missing_Count > 0) {
+      values <- soil_data[[var_info$Variable_Name]][!is.na(soil_data[[var_info$Variable_Name]])]
+      if (length(values) > 0) {
+        cat(sprintf("    Range: %.3f to %.3f, Mean: %.3f\n", 
+                   min(values, na.rm = TRUE), 
+                   max(values, na.rm = TRUE), 
+                   mean(values, na.rm = TRUE)))
+      }
+    }
+    cat("\n")
+  }
+}
+
+# ============================================================================
+# DATA QUALITY ASSESSMENT
+# ============================================================================
+
+cat("\n⚠️  DATA QUALITY ASSESSMENT:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Variables with high missing data
+high_missing <- variable_summary[variable_summary$Missing_Percentage > 50, ]
+if (nrow(high_missing) > 0) {
+  cat("🚨 Variables with >50% missing data:\n")
+  for (i in 1:nrow(high_missing)) {
+    cat(sprintf("• %s: %.1f%% missing\n", 
+               high_missing$Variable_Name[i], 
+               high_missing$Missing_Percentage[i]))
+  }
+} else {
+  cat("✅ No variables have >50% missing data\n")
+}
+
+cat("\n")
+
+# Variables with very few unique values
+low_unique <- variable_summary[variable_summary$Variable_Type == "Numeric" & 
+                              variable_summary$Unique_Values <= 5 & 
+                              variable_summary$Non_Missing_Count > 0, ]
+if (nrow(low_unique) > 0) {
+  cat("ℹ️  Numeric variables with ≤5 unique values (potential categorical):\n")
+  for (i in 1:nrow(low_unique)) {
+    cat(sprintf("• %s: %d unique values\n", 
+               low_unique$Variable_Name[i], 
+               low_unique$Unique_Values[i]))
+  }
+} else {
+  cat("ℹ️  All numeric variables have >5 unique values\n")
+}
+
+# ============================================================================
+# EXPORT VARIABLE SUMMARY
+# ============================================================================
+
+cat("\n💾 EXPORTING VARIABLE SUMMARY:\n")
+cat("=" , rep("=", 40), "\n", sep="")
+
+# Create output folder if it doesn't exist
+if (!dir.exists("variable_analysis")) {
+  dir.create("variable_analysis")
+}
+
+# Export detailed variable summary
+write.csv(variable_summary, "variable_analysis/soil_variables_detailed_summary.csv", 
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✅ Exported detailed variable summary to: variable_analysis/soil_variables_detailed_summary.csv\n")
+
+# Create a simple variable list for easy reference
+simple_variable_list <- data.frame(
+  Number = variable_summary$Variable_Number,
+  Variable_Name = variable_summary$Variable_Name,
+  Category = variable_summary$Variable_Type,
+  Complete_Percentage = variable_summary$Complete_Percentage,
+  Description = paste0(variable_summary$Data_Type, " - ", variable_summary$Unique_Values, " unique values")
+)
+
+write.csv(simple_variable_list, "variable_analysis/soil_variables_simple_list.csv", 
+          row.names = FALSE, fileEncoding = "UTF-8")
+```
+
+## III.4. Soil Data Export
+
+This section creates a clean soil dataset with selected variables including pH, nutrients, particle sizes, and organic matter measurements. The code adds three versions of parcel identifiers for traceability, generates a data dictionary, and exports the final dataset ready for spatial modeling.
+
+```{r}
+# ============================================================================
+# CREATE CLEAN SOIL DATASET WITH MATCHED PARCEL IDS
+# ============================================================================
+# This script creates a clean soil data CSV with selected variables and 
+# the parcel IDs that have been processed through original + manual matching
+
+cat("=== CREATING CLEAN SOIL DATASET ===\n")
+
+# ============================================================================
+# VERIFY REQUIRED DATA IS AVAILABLE
+# ============================================================================
+
+cat("📋 VERIFYING REQUIRED DATA:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Check if we have the manually corrected soil data from previous analysis
+required_objects <- c("soil_data", "soil_data_manual", "clean_parcel_name")
+
+missing_objects <- c()
+for (obj in required_objects) {
+  if (!exists(obj)) {
+    missing_objects <- c(missing_objects, obj)
+  }
+}
+
+if (length(missing_objects) > 0) {
+  cat("⚠️  Missing required objects from previous analysis:\n")
+  for (obj in missing_objects) {
+    cat("• ", obj, "\n")
+  }
+  cat("\n🔄 Loading original soil data and applying corrections...\n")
+  
+  # Load original soil data if not available
+  if (!exists("soil_data")) {
+    soil_data <- read.csv("BD_soil.csv", sep = ";", dec = ",", header = TRUE, 
+                          stringsAsFactors = FALSE, fileEncoding = "latin1")
+    cat("✅ Loaded original soil data\n")
+  }
+  
+  # Recreate cleaning function if not available
+  if (!exists("clean_parcel_name")) {
+    clean_parcel_name <- function(name) {
+      if (is.na(name) || name == "") return("")
+      cleaned <- toupper(trimws(name))
+      cleaned <- gsub("[^A-Z0-9]", "", cleaned)
+      cleaned <- gsub("PARCELLE", "PARC", cleaned)
+      cleaned <- gsub("PARCEL", "PARC", cleaned)
+      cleaned <- gsub("BLOC", "BL", cleaned)
+      cleaned <- gsub("SECTEUR", "SECT", cleaned)
+      return(cleaned)
+    }
+    cat("✅ Recreated cleaning function\n")
+  }
+  
+  # If soil_data_manual doesn't exist, we need to recreate it
+  if (!exists("soil_data_manual")) {
+    cat("🔧 Recreating manual corrections...\n")
+    
+    # Apply basic processing to soil data
+    soil_data$Parc.Detaillee_UPPER <- toupper(soil_data$Parc.Detaillee)
+    soil_data$Parc_CLEANED <- sapply(soil_data$Parc.Detaillee_UPPER, clean_parcel_name)
+    
+    # Recreate manual correspondences
+    manual_correspondences <- data.frame(
+      Original_Names_Soil_UPPER = c(
+        "D1B1 0-60", "D1B1 60-120", "D 1B 3", "E10A 1", "E10B 1", "E 3A 1", 
+        "E 3B 1", "E 8B 1A", "E 8B 1B", "E8B1C", "F 2A 3", "F 8A 1", "F 9A 1", 
+        "F 9B 1", "G 1A 1", "G 1B 1", "G 2A 1", "G 2B 1", "G 3A 1", "H13A 1", 
+        "H 9A 1", "J 5A 1", "J 5B 1", "J5B EXT", "K 7A 1", "K 7A 2", "KH13D", 
+        "KH13E", "KH 1B", "KH 1C", "KH 2D1", "KH 2D2", "KH 2E", "KH2 E1", 
+        "KH 2F", "KH 3A", "KH 3F", "KH 4D", "KH 9B", "KH 9K 1", "KH 9K 2", 
+        "L 3A 1", "MB 1F 1", "MB 3A 3", "MB 3F", "MB 3L", "MB 3N", "MB 3R", 
+        "MB 3T", "MB 3Y 1", "MB 5S", "MB 7A10", "MB 7A11", "MB 7C 6", "P 2B 2", 
+        "Q 7A 1", "Q 7A 2", "Q 7A 3", "Q 7A 4", "Q7B2", "Q7B3", "Q7B4", "Q7C1", 
+        "Q7C2", "R 2A2", "R 2A 4", "S 1B 1", "S 1B 2", "S 1B 3", "S 1B 4", 
+        "S 1C 1", "S 1C 2", "S 1C 3", "S 1C 4", "S 1F 1", "S 1F2", "S 1F 3", 
+        "S 1F 4", "S 1G 1", "S 1G 2", "S 1G 3", "S 1G 4", "S 1H 1", "S 1H 3", 
+        "S 2A 1", "S 2A 2", "S 2A 3", "S 2A 4", "S 2B 1", "S 2B 2", "S 2B 3", 
+        "S 2B 4", "S 2C 1", "S 2C 2", "S 2C 3", "S 2C 4", "S 2E 1", "S 2E 2", 
+        "S 2E 3", "S 2E3", "S 2E 4", "S 2F 1", "S 2F 3", "S 2G 1", "S 2G 2", 
+        "S 2G 4", "S 6(EFGH)", "S6 NÂ°1", "S6 NÂ°2", "S6 NÂ°3", "S6 NÂ°4", 
+        "T 2", "T30", "T33E 1", "T39C 1", "T 4A", "T 4B", "U 3B 1", "U 3B1", 
+        "U 3B 2", "U 3B2", "U 3K", "U 5G", "U 6C", "U 8D1"
+      ),
+      Manual_Correspondence_Shp_UPPER = c(
+        "D 1B", "D 1B", "D 1B", "E10A", "E10B", "E 3A", "E 3B", "E 8B", "E 8B", 
+        "E 8B", "F 2A", "F 8A", "F 9A", "F 9B", "G 1A", "G 1B", "G 2A", "G 2B", 
+        "G 3A", "H13A", "H 9A", "J 5A", "J 5B", "J 5B", "K 7A", "K 7A", "KH13D", 
+        "KH13E", "KH 1B", "KH 1C", "KH 2D", "KH 2D", "KH 2E", "KH2 E1", "KH 2F", 
+        "KH 3A", "KH 3F", "KH 4D", "KH 9B", "KH 9K", "KH 9K", "L 3A", "MB 1F", 
+        "MB 3A", "MB 3F", "MB 3L", "MB 3N", "MB 3R", "MB 3T", "MB 3Y", "MB 5S", 
+        "MB 7A9", "MB 7A9", "MB 7C 5", "P 2B", "Q 7A", "Q 7A", "Q 7A", "Q 7A", 
+        "Q 7B", "Q 7B", "Q 7B", "Q 7C", "Q 7C", "R 2A", "R 2A", "S 1B", "S 1B", 
+        "S 1B", "S 1B", "S 1C", "S 1C", "S 1C", "S 1C", "S 1F", "S 1F", "S 1F", 
+        "S 1F", "S 1G", "S 1G", "S 1G", "S 1G", "S 1H", "S 1H", "S 2A", "S 2A", 
+        "S 2A", "S 2A", "S 2B", "S 2B", "S 2B", "S 2B", "S 2C", "S 2C", "S 2C", 
+        "S 2C", "S 2E", "S 2E", "S 2E", "S 2E", "S 2E", "S 2F", "S 2F", "S 2G", 
+        "S 2G", "S 2G", "S 6E", "S 6A", "S 6A", "S 6A", "S 6A", "T 2A", "T30", 
+        "T33E", "T39C", "T 4", "T 4", "U 3B", "U 3B", "U 3B", "U 3B", "U 3K", 
+        "U 5G", "U 6C", "U 8D"
+      ),
+      stringsAsFactors = FALSE
+    )
+    
+    # Apply manual correspondences
+    soil_data_manual <- soil_data
+    soil_data_manual$Parc_Manual_Corrected <- soil_data_manual$Parc.Detaillee_UPPER
+    
+    corrections_applied <- 0
+    for (i in 1:nrow(manual_correspondences)) {
+      soil_original <- manual_correspondences$Original_Names_Soil_UPPER[i]
+      shp_corrected <- manual_correspondences$Manual_Correspondence_Shp_UPPER[i]
+      
+      matches <- soil_data_manual$Parc.Detaillee_UPPER == soil_original
+      corrections_applied <- corrections_applied + sum(matches, na.rm = TRUE)
+      soil_data_manual$Parc_Manual_Corrected[matches] <- shp_corrected
+    }
+    
+    # Apply cleaning to manual corrections
+    soil_data_manual$Parc_Manual_CLEANED <- sapply(soil_data_manual$Parc_Manual_Corrected, clean_parcel_name)
+    
+    cat("✅ Applied manual correspondences to", corrections_applied, "records\n")
+  }
+  
+} else {
+  cat("✅ All required data objects are available\n")
+}
+
+# ============================================================================
+# DEFINE SELECTED VARIABLES
+# ============================================================================
+
+cat("\n📝 DEFINING SELECTED VARIABLES:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Define the variables you want to keep
+selected_variables <- c(
+  # Parcel identification (we'll add the processed IDs)
+  "Parc.Detaillee",           # Original parcel name
+  "Annee",                    # Year
+  
+  # Your selected soil measurement variables
+  "Date_prelevement", 
+  "pH", 
+  "C.N", 
+  "CE_mmho_cm", 
+  "Ca_ech_me_100g", 
+  "Mg_ech_me_100g", 
+  "Na_ech_me_100g", 
+  "K_ech_me_100g", 
+  "P2O5_assimilable_mg_kg", 
+  "Argiles", 
+  "Limons_fins", 
+  "Limons_grossiers", 
+  "Sables_fins", 
+  "Sables_grossiers", 
+  "Carbone_organique_pour_mille", 
+  "Azote_total_pour_mille", 
+  "Limons", 
+  "Sables", 
+  "Matiere_organique.", 
+  "S.Ca.Mg.K.Na..me.100g", 
+  "CaO_g.100g", 
+  "Mg.Ca", 
+  "Mg.K", 
+  "Indice_de_batance", 
+  "Texture"
+)
+
+# Check which variables exist in the soil data
+available_vars <- selected_variables[selected_variables %in% names(soil_data_manual)]
+missing_vars <- selected_variables[!selected_variables %in% names(soil_data_manual)]
+
+cat("✅ Available variables:", length(available_vars), "\n")
+cat("⚠️  Missing variables:", length(missing_vars), "\n")
+
+if (length(missing_vars) > 0) {
+  cat("\nMissing variables:\n")
+  for (var in missing_vars) {
+    cat("• ", var, "\n")
+  }
+  
+  # Try to find similar variable names
+  cat("\n🔍 Looking for similar variable names in dataset:\n")
+  all_vars <- names(soil_data_manual)
+  for (missing_var in missing_vars) {
+    # Simple similarity check
+    similar_vars <- c()
+    for (existing_var in all_vars) {
+      # Check if any part of the missing variable name appears in existing variable
+      missing_parts <- unlist(strsplit(missing_var, "[._]"))
+      for (part in missing_parts) {
+        if (nchar(part) > 2 && grepl(part, existing_var, ignore.case = TRUE)) {
+          similar_vars <- c(similar_vars, existing_var)
+          break
+        }
+      }
+    }
+    if (length(similar_vars) > 0) {
+      cat("  '", missing_var, "' might be: ", paste(unique(similar_vars), collapse = ", "), "\n")
+    }
+  }
+}
+
+# ============================================================================
+# CREATE CLEAN SOIL DATASET
+# ============================================================================
+
+cat("\n🔧 CREATING CLEAN SOIL DATASET:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Start with the manually corrected soil data
+clean_soil_data <- soil_data_manual
+
+# Add the processed parcel ID columns
+clean_soil_data$Parcel_ID_Original <- clean_soil_data$Parc.Detaillee_UPPER
+clean_soil_data$Parcel_ID_Manual_Corrected <- clean_soil_data$Parc_Manual_Corrected
+clean_soil_data$Parcel_ID_Cleaned_Final <- clean_soil_data$Parc_Manual_CLEANED
+
+# Select only the available variables plus our parcel ID columns
+final_variables <- c(
+  "Parcel_ID_Original",           # Original parcel name (uppercase)
+  "Parcel_ID_Manual_Corrected",   # After manual corrections
+  "Parcel_ID_Cleaned_Final",      # Final cleaned version for matching
+  available_vars                  # Your selected variables that exist
+)
+
+# Create the final clean dataset
+clean_soil_data <- clean_soil_data[, final_variables]
+
+# Add some metadata columns
+clean_soil_data$Manual_Correction_Applied <- clean_soil_data$Parcel_ID_Original != clean_soil_data$Parcel_ID_Manual_Corrected
+clean_soil_data$Data_Processing_Date <- Sys.Date()
+
+# ============================================================================
+# DATA QUALITY SUMMARY
+# ============================================================================
+
+cat("📊 DATA QUALITY SUMMARY:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+cat("Total records in clean dataset:", nrow(clean_soil_data), "\n")
+cat("Total variables in clean dataset:", ncol(clean_soil_data), "\n")
+
+# Count records with manual corrections
+manual_corrections <- sum(clean_soil_data$Manual_Correction_Applied, na.rm = TRUE)
+cat("Records with manual parcel ID corrections:", manual_corrections, "\n")
+
+# Show unique parcels
+unique_original <- length(unique(clean_soil_data$Parcel_ID_Original))
+unique_final <- length(unique(clean_soil_data$Parcel_ID_Cleaned_Final))
+cat("Unique parcels (original names):", unique_original, "\n")
+cat("Unique parcels (final cleaned):", unique_final, "\n")
+
+# Year range
+if ("Annee" %in% names(clean_soil_data)) {
+  years <- clean_soil_data$Annee[!is.na(clean_soil_data$Annee)]
+  if (length(years) > 0) {
+    cat("Year range:", min(years), "to", max(years), "\n")
+    cat("Years with data:", paste(sort(unique(years)), collapse = ", "), "\n")
+  }
+}
+
+# Missing data summary for selected variables
+cat("\n📋 MISSING DATA SUMMARY FOR SELECTED VARIABLES:\n")
+measurement_vars <- available_vars[!available_vars %in% c("Parc.Detaillee", "Annee", "Date_prelevement")]
+
+for (var in measurement_vars) {
+  missing_count <- sum(is.na(clean_soil_data[[var]]))
+  missing_pct <- round((missing_count / nrow(clean_soil_data)) * 100, 1)
+  cat(sprintf("%-30s: %4d missing (%5.1f%%)\n", substr(var, 1, 30), missing_count, missing_pct))
+}
+
+# ============================================================================
+# EXPORT CLEAN DATASET
+# ============================================================================
+
+cat("\n💾 EXPORTING CLEAN DATASET:\n")
+cat("=" , rep("=", 40), "\n", sep="")
+
+# Create output folder
+output_folder <- "clean_soil_dataset"
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+  cat("✅ Created output folder:", output_folder, "\n")
+}
+
+# Export main clean dataset
+output_filename <- file.path(output_folder, "clean_soil_data_with_matched_parcels.csv")
+write.csv(clean_soil_data, output_filename, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✅ Exported clean soil dataset to:", output_filename, "\n")
+
+# Create a data dictionary
+data_dictionary <- data.frame(
+  Variable_Name = names(clean_soil_data),
+  Variable_Type = sapply(clean_soil_data, class),
+  Description = c(
+    "Original parcel name (uppercase)",
+    "Parcel name after manual corrections",  
+    "Final cleaned parcel name for GIS matching",
+    "Original parcel name (mixed case)",
+    "Year of sampling",
+    if ("Date_prelevement" %in% available_vars) "Sampling date" else NULL,
+    if ("pH" %in% available_vars) "Soil pH" else NULL,
+    if ("C.N" %in% available_vars) "Carbon to Nitrogen ratio" else NULL,
+    if ("CE_mmho_cm" %in% available_vars) "Electrical conductivity (mmho/cm)" else NULL,
+    if ("Ca_ech_me_100g" %in% available_vars) "Exchangeable Calcium (me/100g)" else NULL,
+    if ("Mg_ech_me_100g" %in% available_vars) "Exchangeable Magnesium (me/100g)" else NULL,
+    if ("Na_ech_me_100g" %in% available_vars) "Exchangeable Sodium (me/100g)" else NULL,
+    if ("K_ech_me_100g" %in% available_vars) "Exchangeable Potassium (me/100g)" else NULL,
+    if ("P2O5_assimilable_mg_kg" %in% available_vars) "Assimilable P2O5 (mg/kg)" else NULL,
+    if ("Argiles" %in% available_vars) "Clay content (%)" else NULL,
+    if ("Limons_fins" %in% available_vars) "Fine silt content (%)" else NULL,
+    if ("Limons_grossiers" %in% available_vars) "Coarse silt content (%)" else NULL,
+    if ("Sables_fins" %in% available_vars) "Fine sand content (%)" else NULL,
+    if ("Sables_grossiers" %in% available_vars) "Coarse sand content (%)" else NULL,
+    if ("Carbone_organique_pour_mille" %in% available_vars) "Organic carbon (‰)" else NULL,
+    if ("Azote_total_pour_mille" %in% available_vars) "Total nitrogen (‰)" else NULL,
+    if ("Limons" %in% available_vars) "Total silt content (%)" else NULL,
+    if ("Sables" %in% available_vars) "Total sand content (%)" else NULL,
+    if ("Matiere_organique." %in% available_vars) "Organic matter (%)" else NULL,
+    if ("S.Ca.Mg.K.Na..me.100g" %in% available_vars) "Sum of exchangeable cations (me/100g)" else NULL,
+    if ("CaO_g.100g" %in% available_vars) "Calcium oxide (g/100g)" else NULL,
+    if ("Mg.Ca" %in% available_vars) "Mg/Ca ratio" else NULL,
+    if ("Mg.K" %in% available_vars) "Mg/K ratio" else NULL,
+    if ("Indice_de_batance" %in% available_vars) "Balance index" else NULL,
+    if ("Texture" %in% available_vars) "Soil texture class" else NULL,
+    "Whether manual parcel name correction was applied",
+    "Date when this dataset was processed"
+  ),
+  Non_Missing_Count = sapply(clean_soil_data, function(x) sum(!is.na(x))),
+  Missing_Count = sapply(clean_soil_data, function(x) sum(is.na(x))),
+  stringsAsFactors = FALSE
+)
+
+# Remove NULL entries from Description
+data_dictionary$Description <- ifelse(is.null(data_dictionary$Description), "", data_dictionary$Description)
+
+dict_filename <- file.path(output_folder, "data_dictionary.csv")
+write.csv(data_dictionary, dict_filename, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✅ Exported data dictionary to:", dict_filename, "\n")
+
+# Create a summary report
+summary_report <- data.frame(
+  Metric = c(
+    "Total records",
+    "Total variables", 
+    "Variables requested",
+    "Variables found", 
+    "Variables missing",
+    "Records with manual corrections",
+    "Unique parcels (original)",
+    "Unique parcels (final cleaned)",
+    "Year range",
+    "Processing date"
+  ),
+  Value = c(
+    nrow(clean_soil_data),
+    ncol(clean_soil_data),
+    length(selected_variables),
+    length(available_vars),
+    length(missing_vars),
+    manual_corrections,
+    unique_original,
+    unique_final,
+    if ("Annee" %in% names(clean_soil_data) && length(years) > 0) paste(min(years), "to", max(years)) else "Not available",
+    as.character(Sys.Date())
+  ),
+  stringsAsFactors = FALSE
+)
+
+summary_filename <- file.path(output_folder, "dataset_summary.csv")
+write.csv(summary_report, summary_filename, row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("✅ Exported dataset summary to:", summary_filename, "\n")
+```
+
+## III.5. Shapefile Data Export
+
+This section adds the final cleaned parcel identifier to the shapefile as the second column and exports it in ESRI Shapefile format with all component files, preserving the UTM coordinate system for seamless integration with the soil dataset.
+
+```{r}
+# ============================================================================
+# EXPORT SHAPEFILE WITH FINAL CLEANED PARCEL ID
+# ============================================================================
+# This script exports your shapefile with only the final cleaned parcel ID 
+# added as the second column
+
+cat("=== EXPORTING SHAPEFILE WITH FINAL CLEANED PARCEL ID ===\n")
+
+# Load required libraries
+library(sf)
+library(dplyr)
+
+# ============================================================================
+# VERIFY REQUIRED DATA IS AVAILABLE
+# ============================================================================
+
+cat("📋 VERIFYING REQUIRED SPATIAL DATA:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Check if we have the processed shapefile from previous analysis
+if (!exists("parcelles_filtered") && !exists("parcelles")) {
+  cat("⚠️  Shapefile data not found in environment.\n")
+  cat("🔄 Attempting to load shapefile...\n")
+  
+  # Try to load the shapefile (you may need to adjust the path)
+  shp_files <- list.files(pattern = "*.shp$", recursive = TRUE)
+  if (length(shp_files) > 0) {
+    cat("Found shapefile(s):\n")
+    for (i in 1:length(shp_files)) {
+      cat(i, ". ", shp_files[i], "\n")
+    }
+    cat("\n⚠️  Please ensure your shapefile is loaded as 'parcelles' or 'parcelles_filtered'\n")
+    cat("Example: parcelles <- st_read('your_shapefile.shp')\n\n")
+  } else {
+    cat("❌ No shapefile found in current directory\n")
+    cat("Please load your shapefile first:\n")
+    cat("parcelles <- st_read('path/to/your/shapefile.shp')\n\n")
+  }
+  stop("Shapefile data required. Please load your shapefile first.")
+}
+
+# Use the available shapefile data
+if (exists("parcelles_filtered")) {
+  parcelles <- parcelles_filtered
+  cat("✅ Using 'parcelles_filtered' from previous analysis\n")
+} else if (exists("parcelles")) {
+  cat("✅ Using 'parcelles' shapefile\n")
+} else {
+  stop("No shapefile data available")
+}
+
+# Verify it's a spatial object
+if (!inherits(parcelles, "sf")) {
+  stop("❌ Parcelles object is not a valid sf spatial object")
+}
+
+cat("Shapefile loaded successfully:\n")
+cat("• Features (polygons):", nrow(parcelles), "\n")
+cat("• Columns:", ncol(parcelles), "\n")
+cat("• CRS:", st_crs(parcelles)$input, "\n")
+
+# ============================================================================
+# RECREATE CLEANING FUNCTION IF NEEDED
+# ============================================================================
+
+if (!exists("clean_parcel_name")) {
+  clean_parcel_name <- function(name) {
+    if (is.na(name) || name == "") return("")
+    cleaned <- toupper(trimws(name))
+    cleaned <- gsub("[^A-Z0-9]", "", cleaned)
+    cleaned <- gsub("PARCELLE", "PARC", cleaned)
+    cleaned <- gsub("PARCEL", "PARC", cleaned)
+    cleaned <- gsub("BLOC", "BL", cleaned)
+    cleaned <- gsub("SECTEUR", "SECT", cleaned)
+    return(cleaned)
+  }
+  cat("✅ Recreated parcel name cleaning function\n")
+}
+
+# ============================================================================
+# PROCESS SHAPEFILE WITH FINAL CLEANED ID
+# ============================================================================
+
+cat("\n🔧 PROCESSING SHAPEFILE WITH FINAL CLEANED ID:\n")
+cat("=" , rep("=", 50), "\n", sep="")
+
+# Display current column names
+cat("Current shapefile columns:\n")
+shp_cols <- names(st_drop_geometry(parcelles))
+for (i in 1:length(shp_cols)) {
+  cat(sprintf("%2d. %-20s\n", i, shp_cols[i]))
+}
+
+# Identify the field column (parcel identifier)
+field_column <- NULL
+possible_field_cols <- c("field", "Field", "FIELD", "parcel", "Parcel", "PARCEL", 
+                        "id", "ID", "Id", "nom", "NOM", "name", "NAME")
+
+for (col in possible_field_cols) {
+  if (col %in% names(parcelles)) {
+    field_column <- col
+    break
+  }
+}
+
+if (is.null(field_column)) {
+  cat("\n❌ Could not automatically identify parcel ID column.\n")
+  cat("Available columns:\n")
+  print(names(st_drop_geometry(parcelles)))
+  cat("\nPlease specify the correct column name manually:\n")
+  cat("Example: field_column <- 'your_parcel_id_column_name'\n")
+  stop("Parcel ID column identification required")
+}
+
+cat("\n✅ Using parcel ID column:", field_column, "\n")
+
+# Create final cleaned parcel ID
+cat("\n🔧 Creating final cleaned parcel ID...\n")
+final_cleaned_id <- sapply(toupper(parcelles[[field_column]]), clean_parcel_name)
+
+# Create new shapefile with final cleaned ID in second position
+cat("📝 Adding final cleaned ID as second column...\n")
+
+# Get all columns except geometry
+data_cols <- st_drop_geometry(parcelles)
+
+# Create new data frame with final cleaned ID as second column
+new_data <- data.frame(
+  data_cols[1],  # First original column
+  Final_Cleaned_ID = final_cleaned_id,  # Our new column in second position
+  data_cols[2:ncol(data_cols)]  # Rest of original columns
+)
+
+# Create new sf object with the reordered columns
+final_shapefile <- st_sf(new_data, geometry = st_geometry(parcelles))
+
+# Verify the column order
+cat("\n✅ Final shapefile columns:\n")
+final_cols <- names(st_drop_geometry(final_shapefile))
+for (i in 1:length(final_cols)) {
+  cat(sprintf("%2d. %-20s", i, final_cols[i]))
+  if (i == 2) cat(" ← Final cleaned ID")
+  cat("\n")
+}
+
+cat("\n📊 SUMMARY:\n")
+cat("• Total parcels:", nrow(final_shapefile), "\n")
+cat("• Total columns:", ncol(final_shapefile), "\n")
+cat("• Final cleaned ID added as column 2\n")
+
+# ============================================================================
+# EXPORT FINAL SHAPEFILE
+# ============================================================================
+
+cat("\n💾 EXPORTING FINAL SHAPEFILE:\n")
+cat("=" , rep("=", 40), "\n", sep="")
+
+# Create output folder
+output_folder <- "clean_soil_dataset"
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+}
+
+# Export the final shapefile
+shapefile_path <- file.path(output_folder, "parcels_with_final_id")
+
+# Remove existing files if they exist
+existing_files <- list.files(output_folder, pattern = "parcels_with_final_id.*", full.names = TRUE)
+if (length(existing_files) > 0) {
+  file.remove(existing_files)
+}
+
+# Write shapefile
+st_write(final_shapefile, paste0(shapefile_path, ".shp"), 
+         driver = "ESRI Shapefile", delete_dsn = TRUE, quiet = TRUE)
+
+cat("✅ Exported final shapefile to:", paste0(shapefile_path, ".shp"), "\n")
+
+# Export attribute table for reference
+attr_filename <- file.path(output_folder, "final_shapefile_attributes.csv")
+write.csv(st_drop_geometry(final_shapefile), attr_filename, row.names = FALSE, fileEncoding = "UTF-8")
+```
