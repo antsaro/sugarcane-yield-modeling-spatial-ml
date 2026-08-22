@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software or methodology, please cite it as below."
+type: software
+title: "Sugarcane Yield Modeling: Spatial Data Fusion and Machine Learning"
+abstract: >
+  A two-stage pipeline for modeling sugarcane yield variability under
+  irrigated conditions. The first stage (R, R-INLA) reconciles yield,
+  soil, rainfall, weather and foliar diagnostic data and reconstructs
+  missing soil measurements with a Bayesian conditional autoregressive
+  spatial model, applying an isometric log-ratio transform to handle
+  compositional granulometry fractions. The second stage (Python,
+  scikit-learn / XGBoost / LightGBM / CatBoost / SHAP) benchmarks
+  supervised regression models on the fused dataset and interprets them
+  with SHAP values and partial dependence analysis, separately for
+  gravity-irrigated and drip-irrigated parcels.
+authors:
+  - family-names: "[Your last name]"
+    given-names: "[Your first name]"
+    affiliation: "[Your institution]"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/[your-username]/sugarcane-yield-modeling"
+license: MIT
+version: 1.0.0
+date-released: "2026-08-22"
+keywords:
+  - sugarcane
+  - yield modeling
+  - spatial statistics
+  - R-INLA
+  - conditional autoregressive model
+  - compositional data
+  - machine learning
+  - SHAP
+  - agriculture
+  - remote sensing
+  - precision agriculture
