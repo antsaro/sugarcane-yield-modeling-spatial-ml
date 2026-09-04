@@ -331,8 +331,7 @@ The raw and intermediate data files used by these scripts (yield tables, soil sa
 If this code or methodology is useful for your own work, please cite it as described in `CITATION.cff`. A plain-text version:
 
 ```
-[Author name(s)]. Sugarcane Yield Modeling: Spatial Data Fusion and Machine Learning.
-GitHub repository, 2026. https://github.com/[your-username]/sugarcane-yield-modeling
+Randrianantenaina, A. S., Christina, M., Heuclin, B., Yana, B., Sall, M. T., & Bravin, M. N. (2026). Drivers of sugarcane yield and sucrose content variability across irrigation systems in the Senegalese Sahel: A machine learning approach. Manuscript submitted to Field Crops Research.
 ```
 
 ## License
